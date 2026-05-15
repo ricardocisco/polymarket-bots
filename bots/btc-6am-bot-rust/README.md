@@ -1,95 +1,83 @@
 # BTC 6am Bot
 
-Bot em Rust para a estratégia inferida do arquivo `polybacktest-free-money-on-polymarket-at-6am-2038807374060990916.md`.
+Bot Rust para operar mercados BTC de 5 minutos em uma hora UTC configuravel. O nome vem da ideia original de operar perto de 06:00 UTC, mas a hora real vem de `TARGET_HOUR_UTC`.
 
-## Leitura da estratégia
+## Como funciona
 
-O post fala em:
+O bot busca mercados BTC de 5m na janela configurada, escolhe `UP` ou `DOWN`, valida preco/edge/liquidez e registra paper trade ou envia ordem real.
 
-- `9.075` mercados BTC de `5 minutos`
-- `384` trades
-- uma regra ligada às `06:00 UTC`
-- taxa de acerto de `57,8%`
+Por padrao:
 
-A inferência operacional mais consistente é:
+- `DRY_RUN=true`
+- `ALLOW_LIVE_TRADING=false`
+- `TARGET_HOUR_UTC=7`
+- `TRADE_DIRECTION=up`
 
-1. operar **todos** os mercados BTC de 5 minutos iniciados entre `06:00:00` e `06:59:59 UTC`
-2. comprar sempre o mesmo lado direcional
-3. repetir isso ao longo dos dias
+## Techs
 
-Como o arquivo não traz explicitamente se o lado é `UP` ou `DOWN`, o projeto usa `UP` por padrão, mas isso é configurável via `TRADE_DIRECTION`.
+- Rust 2021
+- Tokio
+- Reqwest
+- Serde/serde_json
+- rust_decimal
+- dotenvy
+- polymarket-client-sdk
+- Gamma/CLOB APIs da Polymarket
 
-Observacao: para testes locais, o default atual de `TARGET_HOUR_UTC` foi alterado para `7`.
-
-## Endpoints usados
-
-Baseado na documentação MCP da Polymarket:
-
-- Gamma `GET /events/keyset` para descoberta histórica e live
-- Gamma `GET /markets/{id}` para reconciliação/settle
-- CLOB `GET /price` para melhor ask do token escolhido
-- CLOB `GET /prices-history` para backtest histórico
-- SDK Rust `polymarket-client-sdk` para autenticação e envio de ordens
-
-## Estrutura
-
-```text
-src/
-├── backtest.rs
-├── config/
-│   ├── env.rs
-│   └── mod.rs
-├── execution/
-│   ├── claim.rs
-│   ├── exchange.rs
-│   └── mod.rs
-├── feed/
-│   ├── mod.rs
-│   ├── orderbook.rs
-│   └── underlying.rs
-├── storage/
-│   ├── mod.rs
-│   └── paper_trades.rs
-├── strategy/
-│   ├── base.rs
-│   ├── mod.rs
-│   └── six_am.rs
-├── bin/
-│   ├── backtest.rs
-│   ├── settle_open_trades.rs
-│   └── sweep.rs
-├── lib.rs
-├── main.rs
-└── types.rs
-```
-
-## Uso
+## Instalar
 
 ```bash
-cp .env.example .env
+cd bots/btc-6am-bot-rust
+copy .env.example .env
 cargo build
-cargo run --bin backtest -- --days 30
-cargo run --bin settle_open_trades
-cargo run --bin sweep -- --days 7
-cargo run --release --bin bot
 ```
 
-O binario `backtest` agora varre automaticamente as horas `00:00` ate `23:00 UTC` e imprime uma linha por hora.
+No Linux/macOS, use `cp .env.example .env`.
 
-## Variáveis principais
+## Configurar conta
 
-- `TRADE_DIRECTION=up|down`
-- `EXPECTED_WIN_RATE=0.578`
-- `MAX_ENTRY_PRICE=0.55`
-- `POSITION_SIZE_USDC=5.0`
-- `ENTRY_WINDOW_SECS=300`
-- `DRY_RUN=true`
-- `PAPER_TRADES_PATH=data/paper_trades.json`
-- `DATABASE_URL=` reservado para uma próxima camada Postgres/Supabase
+Principais variaveis:
 
-## Limitações
+```env
+POLYMARKET_PRIVATE_KEY=
+POLYMARKET_SIGNATURE_TYPE=eoa
+DRY_RUN=true
+ALLOW_LIVE_TRADING=false
+PAPER_TRADES_PATH=data/paper_trades.json
 
-- o post não contém direção explícita; isso virou configuração
-- o backtest usa `prices-history` do token para estimar a entrada, não o book histórico
-- o paper trading atual considera fill imediato no preço sinalizado
-- a persistência do template foi implementada localmente em JSON; o gancho para `DATABASE_URL` já existe, mas a camada Postgres ainda não foi conectada
+TARGET_HOUR_UTC=7
+TRADE_DIRECTION=up
+POSITION_SIZE_USDC=5.0
+MAX_ENTRY_PRICE=0.55
+MIN_EDGE=0.02
+```
+
+Para trading real, use uma wallet dedicada com pouco saldo, teste antes, depois configure `DRY_RUN=false` e `ALLOW_LIVE_TRADING=true`.
+
+## Rodar
+
+```bash
+cargo run --bin bot
+```
+
+Resolver paper trades abertos:
+
+```bash
+cargo run --bin settle_open_trades
+```
+
+Via Docker, a partir de `bots/`:
+
+```bash
+docker compose --profile btc6am up --build btc-6am-bot
+```
+
+## Backtest
+
+```bash
+cargo run --bin backtest -- --days 30
+cargo run --bin sweep -- --days 7
+```
+
+O `backtest` varre horas UTC e mostra resultado por hora. O `sweep` usa a configuracao atual do `.env`.
+
