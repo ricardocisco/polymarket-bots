@@ -1,0 +1,63 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+keys/
+wallets/
+
+# Logs and runtime data
+*.log
+logs/
+*.trace
+*.dump
+trades_log*.json
+report.*.json
+**/data/*.json
+**/data/*.csv
+!**/data/.gitkeep
+
+# Rust
+target/
+**/target/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Node / TypeScript
+node_modules/
+dist/
+out/
+coverage/
+*.tsbuildinfo
+.eslintcache
+
+# Build artifacts
+build/
+downloads/
+*.tgz
+*.zip
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+

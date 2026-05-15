@@ -1,0 +1,170 @@
+name: polymarket-bots
+
+x-service-defaults: &service_defaults
+  init: true
+  restart: unless-stopped
+  networks:
+    - bots
+
+services:
+  sniper-bot:
+    <<: *service_defaults
+    build:
+      context: ./95c-3min-bot-python
+    image: polymarket-sniper-bot:local
+    profiles: ["sniper", "trading", "all"]
+    env_file:
+      - path: ./95c-3min-bot-python/.env
+        required: false
+    environment:
+      RUST_LOG: ${SNIPER_RUST_LOG:-info}
+      DRY_RUN: ${SNIPER_DRY_RUN:-true}
+      ALLOW_LIVE_TRADING: ${SNIPER_ALLOW_LIVE_TRADING:-false}
+      BANKROLL: ${SNIPER_BANKROLL:-20.0}
+      POSITION_SIZE_USDC: ${SNIPER_POSITION_SIZE_USDC:-2.0}
+      LOOP_INTERVAL: ${SNIPER_LOOP_INTERVAL:-5}
+      MIN_EDGE: ${SNIPER_MIN_EDGE:-0.04}
+      PAPER_TRADES_PATH: /app/data/paper_trades.json
+    volumes:
+      - ./95c-3min-bot-python/data:/app/data
+      - ./95c-3min-bot-python/logs:/app/logs
+    command: ["bot"]
+
+  bayesian-bot:
+    <<: *service_defaults
+    build:
+      context: ./bayesian-5-15-python
+    image: polymarket-bayesian-bot:local
+    profiles: ["bayesian", "trading", "all"]
+    env_file:
+      - path: ./bayesian-5-15-python/.env
+        required: false
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LOG_DIR: /app/logs
+      BAYESIAN_MODE: ${BAYESIAN_MODE:-AGGRESSIVE_OPTIMIZED}
+      BAYESIAN_BANKROLL: ${BAYESIAN_BANKROLL:-20}
+      BAYESIAN_DRY_RUN: ${BAYESIAN_DRY_RUN:-true}
+      DRY_RUN: ${BAYESIAN_DRY_RUN:-true}
+    volumes:
+      - ./bayesian-5-15-python/logs:/app/logs
+    command: >
+      sh -c 'set -- python main.py --mode "$${BAYESIAN_MODE:-AGGRESSIVE_OPTIMIZED}" --bankroll "$${BAYESIAN_BANKROLL:-20}";
+      if [ "$${BAYESIAN_DRY_RUN:-true}" = "true" ]; then set -- "$$@" --dry-run; fi;
+      exec "$$@"'
+
+  btc-6am-bot:
+    <<: *service_defaults
+    build:
+      context: ./btc-6am-bot-rust
+    image: polymarket-btc-6am-bot:local
+    profiles: ["btc6am", "trading", "all"]
+    env_file:
+      - path: ./btc-6am-bot-rust/.env
+        required: false
+    environment:
+      RUST_LOG: ${BTC_6AM_RUST_LOG:-info}
+      DRY_RUN: ${BTC_6AM_DRY_RUN:-true}
+      ALLOW_LIVE_TRADING: ${BTC_6AM_ALLOW_LIVE_TRADING:-false}
+      PAPER_TRADES_PATH: /app/data/paper_trades.json
+    volumes:
+      - ./btc-6am-bot-rust/data:/app/data
+    command: ["bot"]
+
+  weather-bot:
+    <<: *service_defaults
+    build:
+      context: ./weather-bot-rust
+    image: polymarket-weather-bot:local
+    profiles: ["weather", "trading", "all"]
+    env_file:
+      - path: ./weather-bot-rust/.env
+        required: false
+    environment:
+      RUST_LOG: ${WEATHER_RUST_LOG:-info,warn}
+      DRY_RUN: ${WEATHER_DRY_RUN:-true}
+      ALLOW_LIVE_TRADING: ${WEATHER_ALLOW_LIVE_TRADING:-false}
+    volumes:
+      - ./weather-bot-rust/data:/app/data
+    command: ["bot"]
+
+  x-bot:
+    <<: *service_defaults
+    build:
+      context: ./polymarket-x-bot-ts
+    image: polymarket-x-bot:local
+    profiles: ["xbot", "social", "all"]
+    env_file:
+      - path: ./polymarket-x-bot-ts/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      DRY_RUN: ${X_BOT_DRY_RUN:-true}
+      BOT_TIMEZONE: ${X_BOT_TIMEZONE:-America/Sao_Paulo}
+    volumes:
+      - ./polymarket-x-bot-ts/data:/app/data
+      - ./polymarket-x-bot-ts/vault:/app/vault
+    command: ["node", "dist/index.js"]
+
+  tracker-bot:
+    <<: *service_defaults
+    build:
+      context: ./tracker-wallet-python
+    image: polymarket-tracker-bot:local
+    profiles: ["tracker", "monitoring", "all"]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    env_file:
+      - path: ./tracker-wallet-python/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      MONGO_URI: ${TRACKER_MONGO_URI:-mongodb://mongo:27017/polybot}
+      PORT: ${TRACKER_PORT:-3000}
+    command: ["node", "dist/index.js"]
+
+  esports-hub:
+    <<: *service_defaults
+    build:
+      context: ./polymarket-esports-hub
+    image: polymarket-esports-hub:local
+    profiles: ["hub", "web", "all"]
+    env_file:
+      - path: ./polymarket-esports-hub/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: 3100
+    ports:
+      - "${ESPORTS_HUB_PORT:-3100}:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  mongo:
+    image: mongo:7
+    profiles: ["mongo", "infra", "tracker", "monitoring", "all"]
+    restart: unless-stopped
+    networks:
+      - bots
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+networks:
+  bots:
+    driver: bridge
+
+volumes:
+  mongo_data:

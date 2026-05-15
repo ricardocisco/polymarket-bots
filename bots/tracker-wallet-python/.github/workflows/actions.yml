@@ -1,0 +1,36 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            # Entra na pasta
+            cd ~/polymarket-tracker
+
+            # Puxa a atualização (forçando o topo da main)
+            git fetch --all
+            git pull origin main
+
+            # Instala dependências e compila
+            npm install
+
+            npm run build
+
+            # Reinicia o bot suavemente
+            pm2 restart "polymarket-tracker"
+
+            # Salva a lista de processos (pra voltar se a VPS reiniciar)
+            pm2 save

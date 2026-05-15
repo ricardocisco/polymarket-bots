@@ -1,0 +1,65 @@
+[package]
+name = "polymarket_weather"
+version = "1.0.0"
+edition = "2021"
+description = "Bot que opera mercados de temperatura na Polymarket usando previsões Open-Meteo"
+
+# ── Binários ──────────────────────────────────────────────────────────────────
+[[bin]]
+name = "bot"
+path = "src/main.rs"
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
+
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
+
+[[bin]]
+name = "sim_monitor"
+path = "src/bin/sim_monitor.rs"
+
+# ── Dependências ──────────────────────────────────────────────────────────────
+[dependencies]
+
+# SDK oficial da Polymarket — autenticação EIP-712 real, assinatura de ordens
+polymarket-client-sdk = { version = "0.4", features = ["clob", "ws"] }
+alloy-primitives      = "1"
+alloy-signer-local    = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (TLS via rustls, sem dependência de OpenSSL)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialização JSON
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Datas e timezone
+chrono = { version = "0.4", features = ["serde"] }
+
+# Aritmética decimal para preços (evita erros de ponto flutuante)
+rust_decimal        = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+
+# Variáveis de ambiente via .env
+dotenvy = "0.15"
+
+# Tratamento de erros ergonômico
+anyhow    = "1"
+thiserror = "1"
+
+# Logging estruturado
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Banco de dados PostgreSQL (para weather_paper_trades)
+tokio-postgres      = "0.7"
+tokio-rustls        = "0.26"
+rustls              = { version = "0.23", features = ["ring"] }
+regex = "1"
+futures = "0.3"

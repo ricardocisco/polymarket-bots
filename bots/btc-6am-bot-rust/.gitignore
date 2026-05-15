@@ -1,0 +1,4 @@
+target/
+data/*.json
+data/*.csv
+.env

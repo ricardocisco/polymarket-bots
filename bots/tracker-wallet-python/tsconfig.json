@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    /* Configurações Básicas para Node.js */
+    "target": "ES2022",                /* Versão moderna do JS suportada pelo Node 20 */
+    "module": "NodeNext",              /* Melhor opção para projetos modernos (ESM) */
+    "moduleResolution": "NodeNext",
+    "rootDir": "./src",                /* Onde está seu código */
+    "outDir": "./dist",                /* Onde o código compilado vai ficar */
+    
+    /* Interoperabilidade */
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    
+    /* Importante: Habilitar a geração de arquivos */
+    "noEmit": false,                   /* Agora ele VAI gerar os arquivos .js */
+    
+    /* Boas práticas (mantendo o que você já tinha) */
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}

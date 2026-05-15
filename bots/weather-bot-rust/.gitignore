@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+node_modules/
+
+# Rust build artifacts
+target/
+
+# Runtime data (gerado pelo bot em execução)
+data/

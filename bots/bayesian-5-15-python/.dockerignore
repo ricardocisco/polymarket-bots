@@ -1,0 +1,14 @@
+.env
+.env.local
+.env.*.local
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+logs/
+*.log
+trades_log*.json
+keys/
+wallets/
+secrets/

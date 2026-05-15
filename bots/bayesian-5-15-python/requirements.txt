@@ -1,0 +1,21 @@
+# ==================== DEPENDÊNCIAS CORE ====================
+websockets==12.0
+asyncio==3.4.3
+requests==2.31.0
+numpy==1.26.0
+python-dateutil==2.8.2
+
+# ==================== WEB3 / BLOCKCHAIN ====================
+web3==6.11.0
+eth-account==0.13.0
+
+# ==================== POLYMARKET SDKS (OPCIONAL) ====================
+py-clob-client>=0.23.0  # SDK oficial Python da Polymarket (necessário para ordens reais)
+
+# ==================== ANÁLISE DE DADOS ====================
+pandas==2.1.3
+scipy==1.11.4
+
+# ==================== UTILS ====================
+python-dotenv==1.0.0
+colorlog==6.8.0
