@@ -1,0 +1,37 @@
+[package]
+name = "polymarket_bayesian"
+version = "0.1.0"
+edition = "2021"
+description = "Rust engine for the Polymarket Bayesian 5/15m bot"
+
+[[bin]]
+name = "bot"
+path = "src/main.rs"
+
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
+
+[[bin]]
+name = "settle_open_trades"
+path = "src/bin/settle_open_trades.rs"
+
+[[bin]]
+name = "sweep"
+path = "src/bin/sweep.rs"
+
+[dependencies]
+polymarket-client-sdk = { version = "0.4", features = ["clob"] }
+alloy-primitives = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+dotenvy = "0.15"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+

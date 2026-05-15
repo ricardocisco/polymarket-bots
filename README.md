@@ -9,7 +9,7 @@ Por seguranca, rode tudo primeiro em `dry-run` ou backtest. Arquivos `.env`, log
 | Projeto | O que faz | Tech principal |
 | --- | --- | --- |
 | `bots/95c-3min-bot-python` | Sniper para mercados cripto perto do fechamento, buscando entradas caras de alta probabilidade. | Rust atual, Python legado |
-| `bots/bayesian-5-15-python` | Bot Bayes + Kelly para mercados cripto de 5m e 15m. | Python |
+| `bots/bayesian-5-15-python` | Bot Bayes + Kelly para mercados cripto de 5m e 15m. | Rust atual, Python legado |
 | `bots/btc-6am-bot-rust` | Estrategia BTC 5m em uma hora UTC configuravel. | Rust |
 | `bots/weather-bot-rust` | Bot para mercados de temperatura usando previsoes e historico climatico. | Rust |
 | `bots/tracker-wallet-python` | Bot Discord para rastrear carteiras Polymarket. Nao executa trades. | TypeScript/Node |
@@ -66,4 +66,3 @@ Cada servico le o `.env` do respectivo projeto se ele existir.
 4. Rode backtest.
 5. Rode em `dry-run`.
 6. So depois considere trading real.
-

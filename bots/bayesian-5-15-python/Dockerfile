@@ -1,20 +1,31 @@
-FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    LOG_DIR=/app/logs
+FROM rust:1.86-slim AS builder
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-COPY . .
-RUN mkdir -p logs
+RUN cargo build --release --bin bot --bin backtest --bin settle_open_trades --bin sweep
 
-CMD ["python", "main.py", "--mode", "AGGRESSIVE_OPTIMIZED", "--bankroll", "20", "--dry-run"]
+FROM debian:bookworm-slim
+
+ENV RUST_LOG=info
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/data /app/logs
+
+COPY --from=builder /app/target/release/bot /usr/local/bin/bot
+COPY --from=builder /app/target/release/backtest /usr/local/bin/backtest
+COPY --from=builder /app/target/release/settle_open_trades /usr/local/bin/settle_open_trades
+COPY --from=builder /app/target/release/sweep /usr/local/bin/sweep
+
+CMD ["bot"]
+

@@ -40,18 +40,16 @@ services:
       - path: ./bayesian-5-15-python/.env
         required: false
     environment:
-      PYTHONUNBUFFERED: "1"
-      LOG_DIR: /app/logs
       BAYESIAN_MODE: ${BAYESIAN_MODE:-AGGRESSIVE_OPTIMIZED}
       BAYESIAN_BANKROLL: ${BAYESIAN_BANKROLL:-20}
-      BAYESIAN_DRY_RUN: ${BAYESIAN_DRY_RUN:-true}
       DRY_RUN: ${BAYESIAN_DRY_RUN:-true}
+      ALLOW_LIVE_TRADING: ${BAYESIAN_ALLOW_LIVE_TRADING:-false}
+      BAYESIAN_FLAT_STAKE_USDC: ${BAYESIAN_FLAT_STAKE_USDC:-1}
+      PAPER_TRADES_PATH: /app/data/paper_trades.json
     volumes:
+      - ./bayesian-5-15-python/data:/app/data
       - ./bayesian-5-15-python/logs:/app/logs
-    command: >
-      sh -c 'set -- python main.py --mode "$${BAYESIAN_MODE:-AGGRESSIVE_OPTIMIZED}" --bankroll "$${BAYESIAN_BANKROLL:-20}";
-      if [ "$${BAYESIAN_DRY_RUN:-true}" = "true" ]; then set -- "$$@" --dry-run; fi;
-      exec "$$@"'
+    command: ["bot"]
 
   btc-6am-bot:
     <<: *service_defaults

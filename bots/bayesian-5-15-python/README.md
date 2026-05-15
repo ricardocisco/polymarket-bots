@@ -1,26 +1,26 @@
 # Polymarket Bayesian 5/15 Bot
 
-Bot Python para mercados cripto `Up or Down` de 5m e 15m na Polymarket. Ele combina sinais tecnicos, modelo Bayesiano e Kelly Criterion para decidir direcao e tamanho de posicao.
+Bot para mercados cripto `Up or Down` de 5m e 15m na Polymarket. A mecanica principal foi portada para Rust; os arquivos Python ficaram como legado/referencia.
 
 ## Como funciona
 
-O bot monitora BTC, ETH, SOL e XRP. Para cada mercado ativo, ele:
+O engine Rust monitora BTC, ETH, SOL e XRP. Para cada mercado ativo, ele:
 
-- le candles de 1 minuto da Binance;
-- calcula sinais como momentum, tendencia, volume e volatilidade;
-- estima probabilidade de `UP` ou `DOWN`;
-- valida preco/liquidez no order book da Polymarket;
-- calcula stake pelo Kelly fracionario;
-- roda em dry-run ou envia ordem real, conforme configuracao.
+- busca candles de 1 minuto da Binance;
+- calcula sinais de RSI, EMA, volume, volatilidade, distancia do strike e momentum curto;
+- combina os sinais com Naive Bayes;
+- valida edge, faixa de preco e liquidez do order book;
+- usa Kelly fracionario para validar o risco;
+- grava paper trade ou envia ordem real, conforme configuracao.
 
 ## Techs
 
-- Python 3.11+
-- requests
-- websockets
-- numpy/pandas/scipy
-- python-dotenv
-- py-clob-client
+- Rust 2021
+- Tokio
+- Reqwest
+- Serde/serde_json
+- dotenvy
+- polymarket-client-sdk
 - Binance API
 - Gamma/CLOB APIs da Polymarket
 
@@ -28,46 +28,48 @@ O bot monitora BTC, ETH, SOL e XRP. Para cada mercado ativo, ele:
 
 ```bash
 cd bots/bayesian-5-15-python
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
+copy .env.example .env
+cargo build
 ```
 
-No Linux/macOS, use `source venv/bin/activate`.
+No Linux/macOS, use `cp .env.example .env`.
 
 ## Configurar conta
 
-```bash
-copy .env.example .env
-```
-
-Preencha:
+Principais variaveis:
 
 ```env
-POLYMARKET_PRIVATE_KEY=
-POLYMARKET_FUNDER=
-POLYMARKET_SIGNATURE_TYPE=1
+DRY_RUN=true
+ALLOW_LIVE_TRADING=false
+BAYESIAN_MODE=AGGRESSIVE_OPTIMIZED
+BAYESIAN_BANKROLL=20
+BAYESIAN_FLAT_STAKE_USDC=1
+PAPER_TRADES_PATH=data/paper_trades.json
 
-# Opcional, se voce ja tiver credenciais L2
-POLYMARKET_API_KEY=
-POLYMARKET_API_SECRET=
-POLYMARKET_API_PASSPHRASE=
+BAYESIAN_MIN_BUY_PRICE=0.50
+BAYESIAN_MAX_BUY_PRICE=0.58
+BAYESIAN_MIN_ASK_SIZE_USD=5.0
+
+# Apenas para trading real
+POLYMARKET_PRIVATE_KEY=
+POLYMARKET_SIGNATURE_TYPE=proxy
 ```
 
-Use `POLYMARKET_SIGNATURE_TYPE=1` para conta criada pelo site/Google/email. Use `0` para wallet direta e `2` para Safe/proxy quando aplicavel.
+Use `proxy` para a maioria das contas criadas pelo site da Polymarket. Use `eoa` para wallet direta e `gnosis` para Safe quando aplicavel.
 
 ## Rodar
 
 Primeiro em dry-run:
 
 ```bash
-python main.py --mode AGGRESSIVE_OPTIMIZED --bankroll 20 --dry-run
+cargo run --bin bot
 ```
 
-Trading real, somente depois de validar:
+Para trading real, valide antes e depois configure:
 
-```bash
-python main.py --mode AGGRESSIVE_OPTIMIZED --bankroll 20 --live
+```env
+DRY_RUN=false
+ALLOW_LIVE_TRADING=true
 ```
 
 Via Docker, a partir de `bots/`:
@@ -78,13 +80,18 @@ docker compose --profile bayesian up --build bayesian-bot
 
 ## Backtest
 
-O backtest nao precisa de chave privada e nao envia ordens.
+O backtest usa dados publicos da Polymarket/CLOB e candles historicos da Binance. Nao envia ordens.
 
 ```bash
-python backtest.py --days 3
-python backtest.py --days 7 --mode AGGRESSIVE_OPTIMIZED --asset BTC --interval 5 --trades
-python backtest.py --days 14 --bankroll 20 --stake 1
+cargo run --bin backtest -- --days 3
+cargo run --bin backtest -- --days 7 --asset BTC --interval 5 --trades
+cargo run --bin backtest -- --days 14 --stake 1
+cargo run --bin sweep -- --days 3 --asset ETH --interval 15
 ```
 
-Logs e resultados de trades ficam em arquivos `trades_log*.json` e devem continuar fora do git.
+Resolver paper trades abertos:
+
+```bash
+cargo run --bin settle_open_trades
+```
 
