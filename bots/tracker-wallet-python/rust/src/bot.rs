@@ -18,6 +18,55 @@ pub struct BotData {
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, BotData, Error>;
 
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+async fn ensure_allowed(ctx: Context<'_>) -> Result<bool, Error> {
+    if let Some(allowed_channel_id) = env_u64("ALLOWED_CHANNEL_ID") {
+        if ctx.channel_id().get() != allowed_channel_id {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(format!(
+                        "Use os comandos somente no canal <#{allowed_channel_id}>."
+                    ))
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(false);
+        }
+    }
+
+    if let Some(allowed_role_id) = env_u64("ALLOWED_ROLE_ID") {
+        let has_role = ctx
+            .author_member()
+            .await
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .any(|role_id| role_id.get() == allowed_role_id)
+            })
+            .unwrap_or(false);
+
+        if !has_role {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(format!(
+                        "Apenas membros com o cargo <@&{allowed_role_id}> podem usar este bot."
+                    ))
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 // ─── Comandos slash ───────────────────────────────────────────────────────────
 
 /// Começa a rastrear uma carteira Polymarket neste canal
@@ -26,6 +75,10 @@ pub async fn track(
     ctx: Context<'_>,
     #[description = "Endereço 0x ou @username da carteira"] input: String,
 ) -> Result<(), Error> {
+    if !ensure_allowed(ctx).await? {
+        return Ok(());
+    }
+
     ctx.defer().await?;
 
     let db = &ctx.data().db;
@@ -123,6 +176,10 @@ pub async fn untrack(
     ctx: Context<'_>,
     #[description = "Endereço 0x ou @username da carteira"] input: String,
 ) -> Result<(), Error> {
+    if !ensure_allowed(ctx).await? {
+        return Ok(());
+    }
+
     ctx.defer().await?;
 
     let db = &ctx.data().db;
@@ -148,10 +205,8 @@ pub async fn untrack(
         .await?
     {
         None => {
-            ctx.say(format!(
-                "⚠️ Este canal não estava rastreando:\n`{address}`"
-            ))
-            .await?;
+            ctx.say(format!("⚠️ Este canal não estava rastreando:\n`{address}`"))
+                .await?;
         }
         Some(_) => {
             // Garbage collection: remove carteira se não tem mais inscrições
@@ -184,6 +239,10 @@ pub async fn untrack(
 /// Lista todas as carteiras rastreadas neste canal
 #[poise::command(slash_command, guild_only, rename = "list")]
 pub async fn list_wallets(ctx: Context<'_>) -> Result<(), Error> {
+    if !ensure_allowed(ctx).await? {
+        return Ok(());
+    }
+
     ctx.defer().await?;
 
     let db = &ctx.data().db;
@@ -221,8 +280,7 @@ pub async fn list_wallets(ctx: Context<'_>) -> Result<(), Error> {
             .find_one(doc! { "address": &sub.wallet_address })
             .await?;
 
-        let username =
-            get_username_from_address(http_client, &sub.wallet_address).await;
+        let username = get_username_from_address(http_client, &sub.wallet_address).await;
         let display_name = username.map(|u| format!("@{u}"));
 
         let mut field_name = String::new();
@@ -271,6 +329,10 @@ pub async fn filter(
     #[description = "Valor mínimo em USD para notificar (0 = sem filtro)"] min_usd: Option<f64>,
     #[description = "Limpar todos os filtros desta carteira"] limpar: Option<bool>,
 ) -> Result<(), Error> {
+    if !ensure_allowed(ctx).await? {
+        return Ok(());
+    }
+
     ctx.defer().await?;
 
     let db = &ctx.data().db;
@@ -314,11 +376,8 @@ pub async fn filter(
                 doc! { "$set": { "filters": { "keywords": [], "minUsd": 0.0 } } },
             )
             .await?;
-        ctx.say(format!(
-            "✅ Filtros removidos para `{}`!",
-            &address[..8]
-        ))
-        .await?;
+        ctx.say(format!("✅ Filtros removidos para `{}`!", &address[..8]))
+            .await?;
         return Ok(());
     }
 
@@ -388,6 +447,10 @@ pub async fn filter(
 /// Mostra a ajuda do bot
 #[poise::command(slash_command)]
 pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
+    if !ensure_allowed(ctx).await? {
+        return Ok(());
+    }
+
     ctx.defer().await?;
 
     let embed = CreateEmbed::new()

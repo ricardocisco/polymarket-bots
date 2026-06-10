@@ -1,0 +1,17 @@
+{
+  "name": "polymarket-discord-alert-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bot de aviso para updates estruturais em eventos da Polymarket via Discord webhook.",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node src/index.js --once",
+    "validate:event": "node scripts/validate-event.js",
+    "test:webhook": "node scripts/send-discord-webhook-check.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
