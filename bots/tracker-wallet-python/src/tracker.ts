@@ -1,6 +1,6 @@
-import { Client, TextChannel, EmbedBuilder } from "discord.js";
+import { Client, EmbedBuilder } from "discord.js";
 import { Wallet, Subscription } from "./models.js";
-import { fetchRecentActivity } from "./polymarket.js";
+import { fetchRecentActivity, getUsernameFromAddress } from "./polymarket.js";
 import { logger } from "./logger.js";
 
 const CHECK_INTERVAL = 10000; // 10 segundos
@@ -84,6 +84,7 @@ export async function startTrackerLoop(client: Client) {
 
         // Busca atividades via /activity endpoint (desde o último timestamp)
         const activities = await fetchRecentActivity(wallet.address, wallet.lastTimestamp);
+        const trackedDisplayName = await getUsernameFromAddress(wallet.address);
 
         if (activities.length === 0) {
           // Não loga mais nada aqui, o fetchRecentActivity já loga
@@ -152,8 +153,9 @@ export async function startTrackerLoop(client: Client) {
           //   description += `${mentions}\n\n`;
           // }
 
-          if (trade.displayName) {
-            description += `**Trader:** ${trade.displayName}\n`;
+          const traderName = trackedDisplayName || trade.displayName;
+          if (traderName) {
+            description += `**Trader:** ${traderName}\n`;
           }
 
           // Usa o marketTitle que já tem o link (ou não)
@@ -211,58 +213,71 @@ export async function startTrackerLoop(client: Client) {
 
           // Envia para todos os canais inscritos
           let sentCount = 0;
+          let filteredCount = 0;
+          let failedCount = 0;
           for (const sub of subs) {
-            // --- LÓGICA DE FILTROS ---
+            // --- Logica de filtros ---
             if (sub.filters) {
               const { minUsd, keywords } = sub.filters;
 
-              // 1. Filtro de Valor Mínimo (USD)
-              if (minUsd && minUsd > 0) {
-                if (tradeValue < minUsd) {
-                  // logger.debug(`   🚫 Filtrado por valor ($${tradeValue.toFixed(2)} < $${minUsd})`);
-                  continue;
-                }
+              if (minUsd && minUsd > 0 && tradeValue < minUsd) {
+                filteredCount++;
+                logger.debug(`   Canal ${sub.channelId} filtrado por valor ($${tradeValue.toFixed(2)} < $${minUsd})`);
+                continue;
               }
 
-              // 2. Filtro de Palavras-chave
               if (keywords && keywords.length > 0) {
                 const titleLower = trade.marketTitle.toLowerCase();
                 const hasKeyword = keywords.some((k) => titleLower.includes(k.toLowerCase()));
                 if (!hasKeyword) {
-                  // logger.debug(`   🚫 Filtrado por keyword: "${trade.marketTitle}"`);
+                  filteredCount++;
+                  logger.debug(`   Canal ${sub.channelId} filtrado por keyword: "${trade.marketTitle}"`);
                   continue;
                 }
               }
             }
-            // -------------------------
 
             try {
-              const channel = client.channels.cache.get(sub.channelId) as TextChannel;
+              const channel = await client.channels.fetch(sub.channelId).catch((error: any) => {
+                logger.error(
+                  `   Erro ao buscar canal ${sub.channelId}: ${error?.code ?? "UNKNOWN"} ${error?.message ?? error}`
+                );
+                return null;
+              });
 
               if (!channel) {
-                logger.error(`   ❌ Canal ${sub.channelId} não encontrado no cache`);
+                failedCount++;
+                logger.error(`   Canal ${sub.channelId} nao encontrado ou inacessivel pelo bot`);
                 continue;
               }
 
-              if (!channel.isTextBased()) {
-                logger.error(`   ❌ Canal ${sub.channelId} não é baseado em texto`);
+              if (!channel.isTextBased() || !("send" in channel) || typeof channel.send !== "function") {
+                failedCount++;
+                logger.error(`   Canal ${sub.channelId} nao aceita envio de mensagens`);
                 continue;
               }
 
-              await channel.send({ embeds: [embed] });
+              const sendableChannel = channel as typeof channel & {
+                send: (options: { embeds: EmbedBuilder[] }) => Promise<unknown>;
+              };
+
+              await sendableChannel.send({ embeds: [embed] });
               sentCount++;
-              logger.info(`   ✓ Enviado para canal ${sub.channelId}`);
+              logger.info(`   Enviado para canal ${sub.channelId}`);
             } catch (e: any) {
-              logger.error(`   ❌ Erro ao enviar para ${sub.channelId}:`, e.message);
+              failedCount++;
+              logger.error(`   Erro ao enviar para ${sub.channelId}: ${e?.code ?? "UNKNOWN"} ${e?.message ?? e}`);
             }
           }
 
           if (sentCount > 0) {
             // Marca como enviado
             sentMessages.set(trade.id, Date.now());
-            logger.info(`   ✅ Mensagem enviada com sucesso para ${sentCount} canal(is)\n`);
+            logger.info(`   Mensagem enviada com sucesso para ${sentCount} canal(is)\n`);
           } else {
-            logger.warn(`   ⚠️ Nenhum canal disponível para envio\n`);
+            logger.warn(
+              `   Nenhum canal recebeu a mensagem (filtrados=${filteredCount}, falhas=${failedCount}, inscritos=${subs.length})\n`
+            );
           }
 
           // Delay entre mensagens
