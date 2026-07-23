@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS weather_paper_trades (
   expected_value    DOUBLE PRECISION,
   edge_per_share    DOUBLE PRECISION,
   strategy_type     TEXT,
+  execution_mode    TEXT        NOT NULL DEFAULT 'paper',
+  order_id           TEXT,
   status            TEXT        NOT NULL DEFAULT 'pending',
   actual_temp       DOUBLE PRECISION,
   pnl               DOUBLE PRECISION,
@@ -70,6 +72,12 @@ ALTER TABLE weather_paper_trades
 
 ALTER TABLE weather_paper_trades
   ADD COLUMN IF NOT EXISTS strategy_type TEXT;
+
+ALTER TABLE weather_paper_trades
+  ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'paper';
+
+ALTER TABLE weather_paper_trades
+  ADD COLUMN IF NOT EXISTS order_id TEXT;
 ";
 
 #[derive(Clone)]
@@ -96,6 +104,8 @@ pub struct WeatherTradeRow {
     pub expected_value: Option<f64>,
     pub edge_per_share: Option<f64>,
     pub strategy_type: Option<String>,
+    pub execution_mode: String,
+    pub order_id: Option<String>,
     pub status: String,
     pub actual_temp: Option<f64>,
     pub pnl: Option<f64>,
@@ -160,6 +170,8 @@ impl WeatherTradeStore {
         expected_value: Option<f64>,
         edge_per_share: Option<f64>,
         strategy_type: Option<&str>,
+        execution_mode: &str,
+        order_id: Option<&str>,
         registered_at: &str,
         created_at: i64,
     ) -> Result<()> {
@@ -170,13 +182,15 @@ impl WeatherTradeStore {
                     question, direction, token_id,
                     size_usdc, entry_price, predicted_temp, temp_unit, confidence,
                     effective_confidence, expected_value, edge_per_share, strategy_type,
+                    execution_mode, order_id,
                     status, registered_at, created_at
                  ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8,
                     $9, $10, $11, $12, $13,
                     $14, $15, $16, $17,
-                    'pending', $18, $19
+                    $18, $19,
+                    'pending', $20, $21
                  ) ON CONFLICT (entry_id) DO NOTHING",
                 &[
                     &entry_id,
@@ -196,6 +210,8 @@ impl WeatherTradeStore {
                     &expected_value,
                     &edge_per_share,
                     &strategy_type,
+                    &execution_mode,
+                    &order_id,
                     &registered_at,
                     &created_at,
                 ],
@@ -276,6 +292,8 @@ impl WeatherTradeStore {
                     expected_value,
                     edge_per_share,
                     strategy_type,
+                    execution_mode,
+                    order_id,
                     status,
                     actual_temp,
                     pnl,
@@ -310,6 +328,8 @@ impl WeatherTradeStore {
                 expected_value: row.get("expected_value"),
                 edge_per_share: row.get("edge_per_share"),
                 strategy_type: row.get("strategy_type"),
+                execution_mode: row.get("execution_mode"),
+                order_id: row.get("order_id"),
                 status: row.get("status"),
                 actual_temp: row.get("actual_temp"),
                 pnl: row.get("pnl"),

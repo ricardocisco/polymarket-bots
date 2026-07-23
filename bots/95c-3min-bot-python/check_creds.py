@@ -17,10 +17,10 @@ API_PASSPHRASE = os.getenv("POLYMARKET_API_PASSPHRASE", "").strip()
 
 print(f"--- DIAGNÓSTICO AVANÇADO ---")
 print(f"Funder (Proxy): {PROXY_ADDR}")
-print(f"API Key: {repr(API_KEY)} (len={len(API_KEY)})")
-print(f"API Secret: {repr(API_SECRET[:5])}... (len={len(API_SECRET)})")
-print(f"API Passphrase: {repr(API_PASSPHRASE[:5])}... (len={len(API_PASSPHRASE)})")
-print(f"Private Key: {repr(PRIVATE_KEY[:10])}... (len={len(PRIVATE_KEY)})")
+print(f"API Key configurada: {bool(API_KEY)} (len={len(API_KEY)})")
+print(f"API Secret configurado: {bool(API_SECRET)} (len={len(API_SECRET)})")
+print(f"API Passphrase configurada: {bool(API_PASSPHRASE)} (len={len(API_PASSPHRASE)})")
+print(f"Private Key configurada: {bool(PRIVATE_KEY)} (len={len(PRIVATE_KEY)})")
 
 # Monkey-patch para interceptar headers
 old_request = requests.Session.request
@@ -31,8 +31,8 @@ def debug_request(self, method, url, *args, **kwargs):
         print("   Headers enviados:")
         for k, v in h.items():
             # Censura parcial
-            if k in ['Poly-Api-Key', 'Poly-Api-Secret', 'Poly-Api-Passphrase']:
-                print(f"   {k}: {v[:5]}...{v[-3:] if len(v)>5 else ''}")
+            if any(marker in k.lower() for marker in ['key', 'secret', 'passphrase', 'signature', 'authorization']):
+                print(f"   {k}: <redacted>")
             else:
                 print(f"   {k}: {v}")
     

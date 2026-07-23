@@ -38,11 +38,15 @@ Principais variaveis:
 POLYMARKET_PRIVATE_KEY=
 DRY_RUN=true
 ALLOW_LIVE_TRADING=false
-MIN_CONFIDENCE=0.98
+MIN_CONFIDENCE=0.60
+BANKROLL_USDC=100.0
 MAX_POSITION_SIZE_USDC=10.0
 MIN_ORDER_SIZE_USDC=1.0
 RUN_INTERVAL_SECS=3600
 DATABASE_URL=
+WEATHER_COM_API_KEY=
+MAX_QUOTE_AGE_SECS=15
+MAX_OPEN_POSITIONS=10
 RUST_LOG=info,warn
 ```
 
@@ -79,11 +83,10 @@ docker compose --profile weather up --build weather-bot
 ## Backtest
 
 ```bash
-cargo run --bin backtest
-cargo run --bin backtest -- --days 30
-cargo run --bin backtest -- --days 60 --min-confidence 0.95
-cargo run --bin backtest -- --days 14 --min-confidence 0.90 --max-position 5.0
+cargo run --bin backtest -- --allow-hindsight
+cargo run --bin backtest -- --allow-hindsight --days 30
+cargo run --bin backtest -- --allow-hindsight --days 60 --min-confidence 0.95
+cargo run --bin backtest -- --allow-hindsight --days 14 --min-confidence 0.90 --max-position 5.0
 ```
 
-Observacao: o backtest de weather usa mercados resolvidos e historico climatico. Ele ajuda a entender qualidade dos ranges e pricing, mas nao substitui dry-run em tempo real.
-
+Observacao: este comando usa temperatura e precos resolvidos, portanto e apenas uma auditoria hindsight. Ele exige `--allow-hindsight` e nao deve ser interpretado como retorno historico executavel. Para validar a estrategia, use snapshots de previsao/order book gravados em tempo real.

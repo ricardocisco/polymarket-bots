@@ -38,9 +38,9 @@ struct HourlyData {
     temperature_2m: Vec<Option<f64>>,
 }
 
-
 pub struct WeatherClient {
     http: reqwest::Client,
+    weather_com_api_key: Option<String>,
 }
 
 impl WeatherClient {
@@ -50,7 +50,13 @@ impl WeatherClient {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .context("Falha ao criar HTTP client de clima")?;
-        Ok(Self { http })
+        let weather_com_api_key = std::env::var("WEATHER_COM_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        Ok(Self {
+            http,
+            weather_com_api_key,
+        })
     }
 
     // ── Métodos de fetch multi-fonte ───────────────────────────────────────
@@ -130,7 +136,7 @@ impl WeatherClient {
              ?latitude={lat}&longitude={lon}\
              &daily=temperature_2m_max\
              &temperature_unit={unit}\
-             &timezone=UTC\
+             &timezone=auto\
              &forecast_days={days}\
              &models={model}",
             lat = market.station_lat,
@@ -145,7 +151,12 @@ impl WeatherClient {
         let resp = match self.http.get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                warn!("[{}] Open-Meteo/{} status {}", market.icao, model, r.status());
+                warn!(
+                    "[{}] Open-Meteo/{} status {}",
+                    market.icao,
+                    model,
+                    r.status()
+                );
                 return Ok(None);
             }
             Err(e) => {
@@ -216,7 +227,7 @@ impl WeatherClient {
              ?latitude={lat}&longitude={lon}\
              &daily=temperature_2m_max\
              &temperature_unit={unit}\
-             &timezone=UTC\
+             &timezone=auto\
              &forecast_days={days}\
              &models=gfs025_ensemble",
             lat = market.station_lat,
@@ -277,7 +288,10 @@ impl WeatherClient {
 
         let mean = member_temps.iter().sum::<f64>() / member_temps.len() as f64;
         let spread = {
-            let max = member_temps.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let max = member_temps
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
             let min = member_temps.iter().cloned().fold(f64::INFINITY, f64::min);
             (max - min).max(0.0)
         };
@@ -308,9 +322,8 @@ impl WeatherClient {
         target_date: NaiveDate,
         unit: TempUnit,
     ) -> Result<Option<SourceForecast>> {
-        let url = format!(
-            "https://aviationweather.gov/api/data/taf?ids={icao}&format=json&metar=false"
-        );
+        let url =
+            format!("https://aviationweather.gov/api/data/taf?ids={icao}&format=json&metar=false");
 
         debug!("[{}] TAF forecast: {}", icao, url);
 
@@ -425,6 +438,13 @@ impl WeatherClient {
         target_date: NaiveDate,
         unit: TempUnit,
     ) -> Result<Option<SourceForecast>> {
+        let Some(api_key) = self.weather_com_api_key.as_deref() else {
+            debug!(
+                "[{}] Wunderground ignorado: WEATHER_COM_API_KEY ausente",
+                icao
+            );
+            return Ok(None);
+        };
         // Wunderground usa a API interna do Weather Company (IBM/TWC)
         // A URL usa geocoords e retorna 7-10 dias de forecast
         let unit_str = match unit {
@@ -437,13 +457,17 @@ impl WeatherClient {
              &format=json\
              &units={unit}\
              &language=en-US\
-             &apiKey=6532d6454b8aa370768e63d6ba5a832e",
+             &apiKey={api_key}",
             lat = lat,
             lon = lon,
             unit = unit_str,
+            api_key = api_key,
         );
 
-        debug!("[{}] Wunderground forecast: lat={:.4} lon={:.4}", icao, lat, lon);
+        debug!(
+            "[{}] Wunderground forecast: lat={:.4} lon={:.4}",
+            icao, lat, lon
+        );
 
         let resp = match self
             .http
@@ -468,6 +492,11 @@ impl WeatherClient {
         let raw: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
 
         // A resposta tem arrays "temperatureMax", "validTimeUtc", etc.
+        let valid_times_local = raw
+            .get("validTimeLocal")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let valid_times = raw
             .get("validTimeUtc")
             .and_then(|v| v.as_array())
@@ -490,11 +519,21 @@ impl WeatherClient {
             .unwrap_or(0);
         let target_ts_end = target_ts_start + 86_400;
 
-        let idx = valid_times.iter().position(|t| {
-            t.as_i64()
-                .map(|ts| ts >= target_ts_start && ts < target_ts_end)
-                .unwrap_or(false)
-        });
+        let target_day = target_date.format("%Y-%m-%d").to_string();
+        let idx = valid_times_local
+            .iter()
+            .position(|t| {
+                t.as_str()
+                    .map(|value| value.starts_with(&target_day))
+                    .unwrap_or(false)
+            })
+            .or_else(|| {
+                valid_times.iter().position(|t| {
+                    t.as_i64()
+                        .map(|ts| ts >= target_ts_start && ts < target_ts_end)
+                        .unwrap_or(false)
+                })
+            });
 
         // Fallback: usa o índice por dias_ahead se não encontrou pelo timestamp
         let idx = idx.unwrap_or(days_ahead);
@@ -546,7 +585,7 @@ impl WeatherClient {
              ?latitude={lat}&longitude={lon}\
              &daily=temperature_2m_max\
              &temperature_unit={unit}\
-             &timezone=UTC\
+             &timezone=auto\
              &forecast_days={days}",
             lat = market.station_lat,
             lon = market.station_lon,
@@ -614,6 +653,12 @@ impl WeatherClient {
             max_temp,
             unit: market.unit,
             confidence,
+            uncertainty: match days_ahead {
+                0 => 0.5,
+                1 => 1.0,
+                2 => 1.5,
+                _ => 2.0,
+            },
         }))
     }
 
@@ -651,13 +696,12 @@ impl WeatherClient {
                 market.icao,
                 resp.status()
             );
-            return self.fetch_official_hourly_today(&market.icao, market.unit).await;
+            return self
+                .fetch_official_hourly_today(&market.icao, market.unit)
+                .await;
         }
 
-        let resp = resp
-            .error_for_status()?
-            .json::<HourlyApiResponse>()
-            .await?;
+        let resp = resp.error_for_status()?.json::<HourlyApiResponse>().await?;
 
         let bias_c = bias_correction_celsius(&market.icao);
         let bias = if market.unit == TempUnit::Fahrenheit {
@@ -692,7 +736,10 @@ impl WeatherClient {
             market.icao,
             snapshots.len(),
             current_hour_utc,
-            snapshots.iter().map(|s| s.temp).fold(f64::NEG_INFINITY, f64::max),
+            snapshots
+                .iter()
+                .map(|s| s.temp)
+                .fold(f64::NEG_INFINITY, f64::max),
             market.unit.symbol(),
         );
 
@@ -709,9 +756,8 @@ impl WeatherClient {
         icao: &str,
         unit: TempUnit,
     ) -> Result<Vec<HourlySnapshot>> {
-        let url = format!(
-            "https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=24"
-        );
+        let url =
+            format!("https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=24");
 
         debug!("[{}] METAR official fallback: {}", icao, url);
 
@@ -813,7 +859,7 @@ impl WeatherClient {
              &start_date={d}&end_date={d}\
              &daily=temperature_2m_max\
              &temperature_unit={unit}\
-             &timezone=UTC",
+             &timezone=auto",
             lat = lat,
             lon = lon,
             d = d,
@@ -845,6 +891,7 @@ impl WeatherClient {
             max_temp,
             unit,
             confidence: 1.0,
+            uncertainty: 0.25,
         }))
     }
 
@@ -887,6 +934,7 @@ impl WeatherClient {
             max_temp,
             unit,
             confidence: 1.0,
+            uncertainty: 0.25,
         }))
     }
 }
@@ -976,7 +1024,10 @@ mod tests {
     fn builds_wunderground_date_url() {
         let d = NaiveDate::from_ymd_opt(2026, 4, 5).unwrap();
         assert_eq!(
-            wunderground_daily_url("https://www.wunderground.com/history/daily/cn/shanghai/ZSPD", d),
+            wunderground_daily_url(
+                "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD",
+                d
+            ),
             "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD/date/2026-4-5"
         );
     }
@@ -984,7 +1035,10 @@ mod tests {
     #[test]
     fn parses_summary_object() {
         let body = r#"{"temperatureMax":{"value":26.4,"unit":"C"}}"#;
-        assert_eq!(parse_wunderground_max_temp(body, TempUnit::Celsius), Some(26.0));
+        assert_eq!(
+            parse_wunderground_max_temp(body, TempUnit::Celsius),
+            Some(26.0)
+        );
     }
 
     #[test]

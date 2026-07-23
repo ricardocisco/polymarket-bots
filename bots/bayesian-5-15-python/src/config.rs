@@ -95,12 +95,12 @@ impl Config {
         let mode = TradingMode::from_env_value(
             &std::env::var("BAYESIAN_MODE")
                 .or_else(|_| std::env::var("TRADING_MODE"))
-                .unwrap_or_else(|_| "AGGRESSIVE_OPTIMIZED".into()),
+                .unwrap_or_else(|_| "CONSERVATIVE".into()),
         )?;
         let (bayesian, kelly, risk, filters) = mode.params();
-        let flat = env_parse("BAYESIAN_FLAT_STAKE_USDC", 1.0)?;
+        let flat = env_parse("BAYESIAN_FLAT_STAKE_USDC", 0.0)?;
 
-        Ok(Self {
+        let cfg = Self {
             private_key: std::env::var("POLYMARKET_PRIVATE_KEY")
                 .or_else(|_| std::env::var("PRIVATE_KEY"))
                 .unwrap_or_default(),
@@ -133,7 +133,9 @@ impl Config {
             strategy_version: std::env::var("STRATEGY_VERSION")
                 .unwrap_or_else(|_| "rust-bayes-v1".into()),
             markets: default_markets(),
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     pub fn live_trading_enabled(&self) -> bool {
@@ -148,6 +150,24 @@ impl Config {
         self.min_buy_price = min_buy_price;
         self.max_buy_price = max_buy_price;
         self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !(0.0..1.0).contains(&self.min_buy_price)
+            || !(0.0..1.0).contains(&self.max_buy_price)
+            || self.min_buy_price > self.max_buy_price
+            || !(0.0..=1.0).contains(&self.bayesian.min_trade_edge)
+        {
+            anyhow::bail!("faixa de compra ou edge bayes invalido");
+        }
+        if self.bankroll <= 0.0
+            || self.kelly.min_position_size <= 0.0
+            || self.kelly.max_position_size < self.kelly.min_position_size
+            || self.loop_interval_secs == 0
+        {
+            anyhow::bail!("parametros de bankroll/Kelly/loop invalidos");
+        }
+        Ok(())
     }
 }
 
@@ -292,7 +312,7 @@ impl TradingMode {
     }
 }
 
-fn base_bayesian() -> BayesianParams {
+pub(crate) fn base_bayesian() -> BayesianParams {
     BayesianParams {
         prior_up: 0.62,
         prior_down: 0.38,

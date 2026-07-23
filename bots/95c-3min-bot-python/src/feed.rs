@@ -208,35 +208,32 @@ impl ClobOrderbookFeed {
         })
     }
 
-    pub async fn buy_price(&self, token_id: &str) -> Result<f64> {
-        let mut url = Url::parse(&format!("{}/price", self.base_url.trim_end_matches('/')))?;
-        url.query_pairs_mut()
-            .append_pair("token_id", token_id)
-            .append_pair("side", "BUY");
-        let resp: PriceResponse = self
+    pub async fn buy_quote(&self, token_id: &str) -> Result<(f64, f64)> {
+        let mut url = Url::parse(&format!("{}/book", self.base_url.trim_end_matches('/')))?;
+        url.query_pairs_mut().append_pair("token_id", token_id);
+        let resp: OrderBookResponse = self
             .http
             .get(url)
             .send()
             .await
-            .context("falha ao consultar CLOB /price")?
+            .context("falha ao consultar CLOB /book")?
             .error_for_status()
-            .context("erro HTTP em CLOB /price")?
+            .context("erro HTTP em CLOB /book")?
             .json()
             .await
-            .context("falha ao parsear CLOB /price")?;
-        Ok(resp.price)
+            .context("falha ao parsear CLOB /book")?;
+        let best = resp.asks.first().context("order book sem asks")?;
+        Ok((best.price, best.size))
     }
 
-    pub async fn refresh_prices(&self, market: &mut StrategyMarket) -> Result<()> {
-        let up = self.buy_price(&market.up_token_id).await;
-        let down = self.buy_price(&market.down_token_id).await;
-        if let Ok(price) = up {
-            market.up_price = price;
-        }
-        if let Ok(price) = down {
-            market.down_price = price;
-        }
-        Ok(())
+    pub async fn refresh_prices(&self, market: &mut StrategyMarket) -> Result<(f64, f64)> {
+        let (up, down) = tokio::try_join!(
+            self.buy_quote(&market.up_token_id),
+            self.buy_quote(&market.down_token_id)
+        )?;
+        market.up_price = up.0;
+        market.down_price = down.0;
+        Ok((up.1, down.1))
     }
 
     pub async fn price_history(
@@ -335,7 +332,9 @@ impl BinanceFeed {
             .append_pair("interval", "1m")
             .append_pair("endTime", &(end_ts * 1000).to_string())
             .append_pair("limit", &limit.to_string());
-        self.fetch_candles(url).await
+        let mut candles = self.fetch_candles(url).await?;
+        candles.retain(|candle| candle.open_time + 60 <= end_ts);
+        Ok(candles)
     }
 
     pub async fn price_at(&self, symbol: &str, ts: i64) -> Result<Option<f64>> {
@@ -382,9 +381,17 @@ impl BinanceFeed {
 }
 
 #[derive(Debug, Deserialize)]
-struct PriceResponse {
+struct OrderBookResponse {
+    #[serde(default)]
+    asks: Vec<BookLevel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BookLevel {
     #[serde(deserialize_with = "deserialize_string_or_number")]
     price: f64,
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    size: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,7 +486,10 @@ fn parse_market(value: &Value, config: MarketConfig) -> Option<StrategyMarket> {
             .get("acceptingOrders")
             .and_then(as_bool)
             .unwrap_or(true),
-        outcome_prices,
+        outcome_prices: vec![
+            outcome_prices.get(up_idx).copied().unwrap_or(0.5),
+            outcome_prices.get(down_idx).copied().unwrap_or(0.5),
+        ],
         config,
     })
 }

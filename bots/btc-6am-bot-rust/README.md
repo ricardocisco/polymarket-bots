@@ -10,7 +10,7 @@ Por padrao:
 
 - `DRY_RUN=true`
 - `ALLOW_LIVE_TRADING=false`
-- `TARGET_HOUR_UTC=7`
+- `TARGET_HOUR_UTC=6`
 - `TRADE_DIRECTION=up`
 
 ## Techs
@@ -45,7 +45,7 @@ DRY_RUN=true
 ALLOW_LIVE_TRADING=false
 PAPER_TRADES_PATH=data/paper_trades.json
 
-TARGET_HOUR_UTC=7
+TARGET_HOUR_UTC=6
 TRADE_DIRECTION=up
 POSITION_SIZE_USDC=5.0
 MAX_ENTRY_PRICE=0.55
@@ -79,5 +79,4 @@ cargo run --bin backtest -- --days 30
 cargo run --bin sweep -- --days 7
 ```
 
-O `backtest` varre horas UTC e mostra resultado por hora. O `sweep` usa a configuracao atual do `.env`.
-
+Por padrao, o `backtest` avalia somente `TARGET_HOUR_UTC`. Use `--scan-hours` para selecionar a hora nos 70% iniciais e validar nos 30% finais (holdout). Configure `EXPECTED_WIN_RATE_SAMPLE_SIZE`; sem tamanho de amostra o bot nao opera. O `sweep` usa a configuracao atual do `.env`.

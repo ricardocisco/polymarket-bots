@@ -363,6 +363,11 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|arg| arg == "--allow-hindsight") {
+        anyhow::bail!(
+            "este comando usa temperatura resolvida e preco final, portanto nao e um backtest preditivo; use --allow-hindsight somente para auditoria de resolucao"
+        );
+    }
     let days: u32 = get_arg(&args, "--days").unwrap_or(30);
     let min_conf: Option<f64> = get_arg(&args, "--min-confidence");
     let max_pos: Option<f64> = get_arg(&args, "--max-position");
@@ -386,6 +391,7 @@ async fn main() -> Result<()> {
             max_position_size_usdc: max_pos
                 .and_then(|v| Decimal::try_from(v).ok())
                 .unwrap_or(dec!(10)),
+            bankroll_usdc: dec!(100),
             min_order_size_usdc: dec!(1),
             run_interval_secs: 3600,
             dry_run: true,
@@ -407,8 +413,15 @@ async fn main() -> Result<()> {
             weather_intraday_poll_secs: 180,
             edge_min: 0.02,
             max_spread_cents: 5.0,
+            max_quote_age_secs: 15,
+            max_open_positions: 10,
             forecast_change_trigger_degrees: 0.4,
             implied_move_trigger_cents: 2.0,
+            num_sources_required: 3,
+            source_agreement_threshold: 1.5,
+            consensus_min_confidence: 0.75,
+            penny_no_max_price: 0.20,
+            cross_market_bins_radius: 2,
         },
     };
 
@@ -532,6 +545,7 @@ async fn run_once(http: &reqwest::Client, weather: &WeatherClient, cfg: &Config,
                 max_temp: actual_temp,
                 unit: rm.market.unit,
                 confidence: min_conf + 0.005,
+                uncertainty: 0.25,
             };
 
             let decision = evaluate(&rm.market, &forecast, cfg);

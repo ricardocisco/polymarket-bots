@@ -47,6 +47,7 @@ pub struct QuoteSnapshot {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub last_price: Option<f64>,
+    pub ask_size: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,12 +217,6 @@ impl StrategyMarket {
             self.question
         )
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PriceResponse {
-    #[serde(deserialize_with = "deserialize_string_or_number")]
-    pub price: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

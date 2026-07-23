@@ -268,8 +268,8 @@ fn synthetic_book(token_id: &str, price: f64) -> OrderBookPrice {
 fn nearest_price(points: &[PricePoint], ts: i64) -> Option<f64> {
     points
         .iter()
-        .filter(|point| (point.t - ts).abs() <= 90)
-        .min_by_key(|point| (point.t - ts).abs())
+        .filter(|point| point.t <= ts && ts - point.t <= 90)
+        .max_by_key(|point| point.t)
         .map(|point| point.p)
 }
 

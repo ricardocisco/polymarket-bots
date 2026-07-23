@@ -37,13 +37,6 @@ impl BayesianModel {
         let mut signals = Vec::new();
         let mut raw_rsi = 50.0;
 
-        if let (Some(strike), Some(current)) = (strike_price, current) {
-            let strike_distance_pct = (current - strike) / strike * 100.0;
-            if strike > 0.0 && strike_distance_pct.abs() > 0.5 {
-                signals.push(self.strike_signal(strike_distance_pct));
-            }
-        }
-
         if matches!(minutes_to_expiry, Some(minutes) if minutes < 3.0) && candles.len() >= 3 {
             let base = candles[candles.len() - 3].close;
             if base > 0.0 {
@@ -114,10 +107,10 @@ impl BayesianModel {
             (0.57, 0.43)
         } else if rsi < self.params.rsi_oversold {
             let oversold_depth = (self.params.rsi_oversold - rsi) / self.params.rsi_oversold;
-            let p_up = 0.60 + (oversold_depth * 0.15).min(0.12);
-            (p_up, 1.0 - p_up)
+            let p_down = 0.60 + (oversold_depth * 0.15).min(0.12);
+            (1.0 - p_down, p_down)
         } else {
-            (0.54, 0.46)
+            (0.46, 0.54)
         };
 
         Some(BayesianSignal {
@@ -261,35 +254,6 @@ impl BayesianModel {
         })
     }
 
-    fn strike_signal(&self, strike_distance_pct: f64) -> BayesianSignal {
-        let (p_up, p_down, confidence) = if strike_distance_pct.abs() < 0.1 {
-            (0.5, 0.5, 0.0)
-        } else if strike_distance_pct > 0.0 {
-            let strength = (strike_distance_pct.abs() / 2.0).min(0.15);
-            (
-                0.5 + strength,
-                0.5 - strength,
-                (strike_distance_pct.abs() / 1.0).min(0.8),
-            )
-        } else {
-            let strength = (strike_distance_pct.abs() / 2.0).min(0.15);
-            (
-                0.5 - strength,
-                0.5 + strength,
-                (strike_distance_pct.abs() / 1.0).min(0.8),
-            )
-        };
-
-        BayesianSignal {
-            name: "strike_distance".into(),
-            p_up,
-            p_down,
-            confidence,
-            weight: 0.25,
-            raw_value: strike_distance_pct,
-        }
-    }
-
     fn short_momentum_signal(&self, price_change_pct: f64) -> Option<BayesianSignal> {
         if price_change_pct.abs() <= 0.1 {
             return None;
@@ -316,9 +280,13 @@ impl BayesianModel {
             return (self.params.prior_up, self.params.prior_down);
         }
         let mut log_odds = (self.params.prior_up / self.params.prior_down).ln();
+        // Os sinais usam os mesmos candles e, portanto, sao correlacionados.
+        // O fator de shrinkage impede que a multiplicacao de odds produza
+        // probabilidades extremas por dupla contagem da mesma informacao.
+        let shrinkage = 0.60;
         for signal in signals {
             if signal.p_down > 0.0 {
-                log_odds += signal.weight * (signal.p_up / signal.p_down).ln();
+                log_odds += shrinkage * signal.weight * (signal.p_up / signal.p_down).ln();
             }
         }
         let odds = log_odds.exp();
@@ -388,4 +356,32 @@ fn ema(prices: &[f64], period: usize) -> Option<f64> {
         value = price * multiplier + value * (1.0 - multiplier);
     }
     Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candles(prices: &[f64]) -> Vec<Candle> {
+        prices
+            .iter()
+            .enumerate()
+            .map(|(i, price)| Candle {
+                open_time: i as i64 * 60,
+                open: *price,
+                high: *price,
+                low: *price,
+                close: *price,
+                volume: 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oversold_momentum_points_down_in_momentum_model() {
+        let model = BayesianModel::new(crate::config::base_bayesian());
+        let prices = (0..30).map(|i| 100.0 - i as f64).collect::<Vec<_>>();
+        let signal = model.momentum_signal(&candles(&prices)).unwrap();
+        assert!(signal.p_down > signal.p_up);
+    }
 }

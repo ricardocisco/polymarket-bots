@@ -45,6 +45,15 @@ impl Strategy for SixAmStrategy {
                 self.config.min_liquidity
             ));
         }
+        if !input.market_closed {
+            let ask_notional = input.quote.ask_size.unwrap_or_default() * current_price;
+            if ask_notional < self.config.min_ask_size_usd {
+                return SignalDecision::hold_owned(format!(
+                    "profundidade no melhor ask ${ask_notional:.2} < ${:.2}",
+                    self.config.min_ask_size_usd
+                ));
+            }
+        }
         if !(0.0..1.0).contains(&current_price) {
             return SignalDecision::hold_owned(format!("preço inválido: {current_price:.4}"));
         }
@@ -55,7 +64,12 @@ impl Strategy for SixAmStrategy {
             ));
         }
 
-        let edge = self.config.expected_win_rate - current_price;
+        let Some(conservative_win_rate) = self.config.conservative_win_rate() else {
+            return SignalDecision::hold(
+                "EXPECTED_WIN_RATE_SAMPLE_SIZE nao configurado; taxa historica sem incerteza",
+            );
+        };
+        let edge = conservative_win_rate - current_price;
         if edge < self.config.min_edge {
             return SignalDecision::hold_owned(format!(
                 "edge {:.2}pp abaixo do mínimo {:.2}pp",
@@ -76,7 +90,7 @@ impl Strategy for SixAmStrategy {
             ),
             order_type: Some(OrderTimeInForce::MarketableLimit),
             limit_price_cents: Some(current_price * 100.0),
-            confidence: Some(self.config.expected_win_rate),
+            confidence: Some(conservative_win_rate),
             diagnostics: Some(StrategyDiagnostics {
                 execution_mode: if self.config.dry_run {
                     "paper".into()
@@ -84,8 +98,8 @@ impl Strategy for SixAmStrategy {
                     "live".into()
                 },
                 size: Some(1),
-                confidence: Some(self.config.expected_win_rate),
-                order_type: Some("marketable_limit".into()),
+                confidence: Some(conservative_win_rate),
+                order_type: Some("FOK".into()),
                 edge: Some(edge),
                 max_entry_price: Some(self.config.max_entry_price),
                 current_price: Some(current_price),
@@ -107,7 +121,7 @@ pub fn strategy_summary(cfg: &Config) -> String {
         "BTC 5m @ {:02}:00 UTC | lado={} | hit-rate esperado={:.1}% | entrada<= {:.3} | edge mín={:.1}pp | stake={} USDC",
         cfg.target_hour_utc,
         cfg.trade_direction,
-        cfg.expected_win_rate * 100.0,
+        cfg.conservative_win_rate().unwrap_or(0.0) * 100.0,
         cfg.max_entry_price,
         cfg.min_edge * 100.0,
         cfg.position_size_usdc

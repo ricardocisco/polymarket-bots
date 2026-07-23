@@ -151,13 +151,15 @@ impl PaperTradeStore {
     fn load_trades(&self) -> Result<Vec<PaperTradeRecord>> {
         let raw = fs::read_to_string(&self.path)
             .with_context(|| format!("falha ao ler {}", self.path.display()))?;
-        Ok(serde_json::from_str(&raw).unwrap_or_default())
+        serde_json::from_str(&raw)
+            .with_context(|| format!("JSON de trades corrompido em {}", self.path.display()))
     }
 
     fn save_trades(&self, trades: &[PaperTradeRecord]) -> Result<()> {
         let raw = serde_json::to_string_pretty(trades)?;
-        fs::write(&self.path, raw)
-            .with_context(|| format!("falha ao escrever {}", self.path.display()))
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, raw).with_context(|| format!("falha ao escrever {}", tmp.display()))?;
+        replace_file(&tmp, &self.path)
     }
 }
 
@@ -166,6 +168,26 @@ fn now_ts() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn replace_file(tmp: &Path, destination: &Path) -> Result<()> {
+    match fs::rename(tmp, destination) {
+        Ok(()) => Ok(()),
+        Err(_) if destination.exists() => {
+            let backup = destination.with_extension("json.bak");
+            if backup.exists() {
+                fs::remove_file(&backup)?;
+            }
+            fs::rename(destination, &backup)?;
+            if let Err(err) = fs::rename(tmp, destination) {
+                let _ = fs::rename(&backup, destination);
+                return Err(err).context("falha ao instalar novo ledger de trades");
+            }
+            fs::remove_file(backup)?;
+            Ok(())
+        }
+        Err(err) => Err(err).context("falha ao substituir ledger de trades"),
+    }
 }
 
 #[allow(dead_code)]

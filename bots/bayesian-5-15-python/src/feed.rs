@@ -242,8 +242,8 @@ impl ClobOrderbookFeed {
             .await
             .context("falha ao parsear CLOB /book")?;
 
-        let best_ask = resp.asks.last().context("order book sem asks")?;
-        let best_bid = resp.bids.last().unwrap_or(best_ask);
+        let best_ask = resp.asks.first().context("order book sem asks")?;
+        let best_bid = resp.bids.first().unwrap_or(best_ask);
         Ok(OrderBookPrice {
             token_id: token_id.to_owned(),
             best_ask: best_ask.price,
@@ -256,14 +256,12 @@ impl ClobOrderbookFeed {
     }
 
     pub async fn refresh_prices(&self, market: &mut StrategyMarket) -> Result<()> {
-        let up = self.buy_price(&market.up_token_id).await;
-        let down = self.buy_price(&market.down_token_id).await;
-        if let Ok(price) = up {
-            market.up_price = price;
-        }
-        if let Ok(price) = down {
-            market.down_price = price;
-        }
+        let (up, down) = tokio::try_join!(
+            self.buy_price(&market.up_token_id),
+            self.buy_price(&market.down_token_id)
+        )?;
+        market.up_price = up;
+        market.down_price = down;
         Ok(())
     }
 
@@ -363,7 +361,9 @@ impl BinanceFeed {
             .append_pair("interval", "1m")
             .append_pair("endTime", &(end_ts * 1000).to_string())
             .append_pair("limit", &limit.to_string());
-        self.fetch_candles(url).await
+        let mut candles = self.fetch_candles(url).await?;
+        candles.retain(|candle| candle.open_time + 60 <= end_ts);
+        Ok(candles)
     }
 
     pub async fn candles_between(
@@ -385,7 +385,8 @@ impl BinanceFeed {
                 .append_pair("startTime", &(cursor * 1000).to_string())
                 .append_pair("endTime", &(end_ts * 1000).to_string())
                 .append_pair("limit", "1000");
-            let chunk = self.fetch_candles(url).await?;
+            let mut chunk = self.fetch_candles(url).await?;
+            chunk.retain(|candle| candle.open_time + 60 <= end_ts);
             if chunk.is_empty() {
                 break;
             }
@@ -561,7 +562,10 @@ fn parse_market(value: &Value, config: MarketConfig) -> Option<StrategyMarket> {
             .get("acceptingOrders")
             .and_then(as_bool)
             .unwrap_or(true),
-        outcome_prices,
+        outcome_prices: vec![
+            outcome_prices.get(up_idx).copied().unwrap_or(0.5),
+            outcome_prices.get(down_idx).copied().unwrap_or(0.5),
+        ],
         config,
     })
 }

@@ -41,15 +41,42 @@ async fn main() -> Result<()> {
 
     let start_min = Utc::now() - Duration::days(days);
     let end_max = Utc::now();
-    let markets = gamma
+    let mut markets = gamma
         .fetch_markets_between(start_min, end_max, true)
         .await
         .context("falha ao buscar mercados fechados")?;
 
+    if !std::env::args().any(|arg| arg == "--scan-hours") {
+        let result = run_backtest_with_markets(&cfg, &markets, &clob).await?;
+        let roi = if result.stake_total > 0.0 {
+            result.pnl / result.stake_total * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "Hora {:02}:00 UTC | candidatos={} trades={} wins={} pnl={:+.2} roi={:+.2}%",
+            cfg.target_hour_utc,
+            result.total_candidates,
+            result.total_trades,
+            result.winners,
+            result.pnl,
+            roi
+        );
+        println!("Use --scan-hours para selecao walk-forward de horario.");
+        return Ok(());
+    }
+
+    markets.sort_by_key(|market| market.start_date);
+    if markets.len() < 2 {
+        anyhow::bail!("mercados insuficientes para divisao treino/holdout");
+    }
+    let split_at = (markets.len() * 70 / 100).clamp(1, markets.len().saturating_sub(1));
+    let (training_markets, holdout_markets) = markets.split_at(split_at);
+
     let mut summaries = Vec::with_capacity(24);
     for hour in 0..24 {
         let local_cfg = cfg.clone().with_target_hour(hour);
-        let result = run_backtest_with_markets(&local_cfg, &markets, &clob).await?;
+        let result = run_backtest_with_markets(&local_cfg, training_markets, &clob).await?;
         let raw_win_rate = if result.total_candidates > 0 {
             result.winners as f64 / result.total_candidates as f64 * 100.0
         } else {
@@ -81,10 +108,17 @@ async fn main() -> Result<()> {
         .iter()
         .max_by(|left, right| left.roi.total_cmp(&right.roi))
         .context("nenhum resultado de hora produzido")?;
+    let selected_cfg = cfg.clone().with_target_hour(best.hour);
+    let holdout = run_backtest_with_markets(&selected_cfg, holdout_markets, &clob).await?;
+    let holdout_roi = if holdout.stake_total > 0.0 {
+        holdout.pnl / holdout.stake_total * 100.0
+    } else {
+        0.0
+    };
 
     println!();
     println!("{}", "=".repeat(88));
-    println!("Backtest BTC 5m por hora UTC");
+    println!("Backtest BTC 5m por hora UTC (70% treino / 30% holdout)");
     println!("{}", "=".repeat(88));
     println!(
         "{:<8} {:>12} {:>10} {:>11} {:>11} {:>10} {:>9}",
@@ -107,6 +141,10 @@ async fn main() -> Result<()> {
     println!(
         "Melhor hora por ROI: {:02}:00 UTC | trades={} | pnl={:+.2} | roi={:+.2}%",
         best.hour, best.total_trades, best.pnl, best.roi
+    );
+    println!(
+        "Holdout da hora selecionada: trades={} | wins={} | pnl={:+.2} | roi={:+.2}%",
+        holdout.total_trades, holdout.winners, holdout.pnl, holdout_roi
     );
     println!(
         "TARGET_HOUR_UTC atual no config: {:02}:00 UTC",

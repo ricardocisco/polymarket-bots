@@ -4,7 +4,7 @@ use alloy_primitives::U256;
 use anyhow::{Context, Result};
 use polymarket_client_sdk::auth::state::Unauthenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
-use polymarket_client_sdk::clob::types::{Side, SignatureType};
+use polymarket_client_sdk::clob::types::{OrderStatusType, OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
 use rust_decimal::Decimal;
@@ -87,14 +87,23 @@ impl LiveExchangeExecutor {
             .price(price)
             .size(shares)
             .side(Side::Buy)
+            .order_type(OrderType::FOK)
             .build()
             .await?;
         let signed = client.sign(&signer, order).await?;
         let resp = client.post_order(signed).await?;
 
+        if !resp.success || !matches!(resp.status, OrderStatusType::Matched) {
+            anyhow::bail!(
+                "ordem FOK nao executada: status={} erro={}",
+                resp.status,
+                resp.error_msg.as_deref().unwrap_or("sem detalhe")
+            );
+        }
+
         Ok(ExecutionUpdate {
             market_id: intent.market_id.clone(),
-            order_id: Some(format!("{:?}", resp)),
+            order_id: Some(resp.order_id),
             simulated: false,
             submitted_price: Some(intent.price),
         })

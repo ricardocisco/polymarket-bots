@@ -69,9 +69,8 @@ try:
     
     print("📋 Cole estas linhas no seu arquivo .env:\n")
     print("-" * 70)
-    print(f"POLYMARKET_API_KEY={creds.api_key}")
-    print(f"POLYMARKET_API_SECRET={creds.api_secret}")
-    print(f"POLYMARKET_API_PASSPHRASE={creds.api_passphrase}")
+    print("Credenciais derivadas com sucesso, mas a exibicao em terminal foi desabilitada")
+    print("para evitar vazamento em logs/shell history. Use um secret manager para armazena-las.")
     print("-" * 70)
     
     print("\n" + "="*70)

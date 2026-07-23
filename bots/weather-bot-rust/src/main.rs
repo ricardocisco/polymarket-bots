@@ -12,8 +12,8 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cfg =
-        Config::from_env_without_private_key().context("falha ao carregar configuracao do weather bot")?;
+    let cfg = Config::from_env_without_private_key()
+        .context("falha ao carregar configuracao do weather bot")?;
     if cfg.live_trading_enabled() && cfg.private_key.trim().is_empty() {
         anyhow::bail!("POLYMARKET_PRIVATE_KEY nao definida para live trading");
     }

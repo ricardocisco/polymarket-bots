@@ -61,10 +61,13 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            if let Err(err) = clob.refresh_prices(&mut market).await {
-                warn!("{} | falha ao atualizar CLOB: {err}", market.slug);
-                continue;
-            }
+            let (up_ask_size, down_ask_size) = match clob.refresh_prices(&mut market).await {
+                Ok(sizes) => sizes,
+                Err(err) => {
+                    warn!("{} | falha ao atualizar CLOB: {err}", market.slug);
+                    continue;
+                }
+            };
             if market.strike_price <= 0.0 {
                 if let Ok(Some(price)) = binance
                     .price_at(&market.config.binance_symbol, market.start_time.timestamp())
@@ -105,6 +108,20 @@ async fn main() -> Result<()> {
 
             let side = decision.side.context("decisao de compra sem side")?;
             let price = decision.limit_price_cents.unwrap_or_default() / 100.0;
+            let ask_size = match side {
+                polymarket_sniper_95c::types::TradeSide::Up => up_ask_size,
+                polymarket_sniper_95c::types::TradeSide::Down => down_ask_size,
+            };
+            let ask_notional = ask_size * price;
+            if ask_notional < cfg.min_ask_size_usd {
+                info!(
+                    "skip | {} | liquidez no melhor ask ${:.2} < ${:.2}",
+                    market.display_label(),
+                    ask_notional,
+                    cfg.min_ask_size_usd
+                );
+                continue;
+            }
             let intent = OrderIntent {
                 market_slug: market.slug.clone(),
                 token_id: market.token_id(side).to_owned(),

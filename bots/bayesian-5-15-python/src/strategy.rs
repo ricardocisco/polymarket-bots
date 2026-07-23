@@ -24,6 +24,10 @@ impl BayesianStrategy {
         }
     }
 
+    pub fn sync_settlements(&mut self, settlements: &[(i64, i64)]) {
+        self.kelly.sync_settlements(settlements);
+    }
+
     pub fn decide(
         &self,
         market: &StrategyMarket,
@@ -48,13 +52,6 @@ impl BayesianStrategy {
             current_price,
             Some(market.minutes_left_at(now)),
         );
-
-        if !prediction.should_trade(self.cfg.bayesian.min_trade_edge) {
-            return SignalDecision::hold(format!(
-                "edge bayes insuficiente: {:.3} < {:.3}",
-                prediction.edge, self.cfg.bayesian.min_trade_edge
-            ));
-        }
 
         if let Some(reason) = self.apply_smart_filters(&prediction, candles, now) {
             return SignalDecision::hold(reason);
@@ -81,6 +78,18 @@ impl BayesianStrategy {
             ));
         }
 
+        let side_probability = match direction {
+            TradeSide::Up => prediction.p_up,
+            TradeSide::Down => prediction.p_down,
+        };
+        let economic_edge = side_probability - market_price;
+        if economic_edge < self.cfg.bayesian.min_trade_edge {
+            return SignalDecision::hold(format!(
+                "edge economico {:.3} < {:.3} (p={:.3}, ask={:.3})",
+                economic_edge, self.cfg.bayesian.min_trade_edge, side_probability, market_price
+            ));
+        }
+
         let token_yes_price = if direction == TradeSide::Up {
             market_price
         } else {
@@ -101,6 +110,12 @@ impl BayesianStrategy {
         }
 
         let stake = self.cfg.flat_stake_usdc.unwrap_or(kelly.position_size);
+        if stake < self.cfg.kelly.min_position_size
+            || stake > self.cfg.kelly.max_position_size
+            || stake > self.cfg.bankroll * self.cfg.kelly.max_bankroll_per_trade
+        {
+            return SignalDecision::hold(format!("stake ${stake:.2} fora dos limites de risco"));
+        }
         let size = (stake / market_price).floor().max(1.0) as u32;
         let rsi = prediction
             .signals
@@ -121,12 +136,8 @@ impl BayesianStrategy {
             side: Some(direction),
             size,
             reason: format!(
-                "bayes {} p_up={:.3} p_down={:.3} edge={:.3} kelly={:.3}",
-                direction,
-                prediction.p_up,
-                prediction.p_down,
-                prediction.edge,
-                kelly.kelly_fraction
+                "bayes {} p_up={:.3} p_down={:.3} edge_liquido={:.3} kelly={:.3}",
+                direction, prediction.p_up, prediction.p_down, economic_edge, kelly.kelly_fraction
             ),
             order_type: Some(OrderTimeInForce::MarketableLimit),
             limit_price_cents: Some(market_price * 100.0),
@@ -139,7 +150,7 @@ impl BayesianStrategy {
                 },
                 size: Some(size),
                 confidence: Some(prediction.confidence),
-                order_type: Some("GTC".into()),
+                order_type: Some("FOK".into()),
                 market_price: Some(market_price),
                 min_entry_price: Some(self.cfg.min_buy_price),
                 max_entry_price: Some(self.cfg.max_buy_price),
@@ -148,7 +159,7 @@ impl BayesianStrategy {
                 rsi,
                 p_up: Some(prediction.p_up),
                 p_down: Some(prediction.p_down),
-                edge: Some(prediction.edge),
+                edge: Some(economic_edge),
                 kelly_fraction: Some(kelly.kelly_fraction),
                 kelly_full: Some(kelly.kelly_fraction_full),
                 volume_ratio,

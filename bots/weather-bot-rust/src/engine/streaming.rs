@@ -6,12 +6,12 @@ use std::time::Duration;
 use alloy_primitives::U256;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
-use chrono::{Local, NaiveDate};
+use chrono::{Local, NaiveDate, Utc};
 use polymarket_client_sdk::auth::state::{Authenticated, Unauthenticated};
 use polymarket_client_sdk::{
     auth::{LocalSigner, Normal, Signer},
     clob::client::Client as ClobClient,
-    clob::types::Side as PolySide,
+    clob::types::{OrderStatusType, OrderType, Side as PolySide},
     clob::Config as ClobConfig,
     POLYGON,
 };
@@ -22,11 +22,13 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::consensus::{compute_consensus, consensus_to_forecast};
-use crate::engine::discovery::{fetch_temperature_markets, winner_of_closed_market, DiscoveredMarket};
+use crate::engine::discovery::{
+    fetch_temperature_markets, winner_of_closed_market, DiscoveredMarket,
+};
 use crate::feed::orderbook::OrderbookFeed;
 use crate::markets::TempUnit;
 use crate::storage::weather_paper_trades::{WeatherTradeRow, WeatherTradeStore};
-use crate::strategy::{evaluate_cross_market_group, evaluate_opportunity_with_trend, CrossMarketDecision, Decision};
+use crate::strategy::{evaluate_cross_market_group, evaluate_opportunity_with_trend, Decision};
 use crate::trend::analyze_trend;
 use crate::types::{ConsensusResult, Forecast, QuoteSnapshot, Side, TrendAnalysis};
 use crate::weather::WeatherClient;
@@ -50,10 +52,11 @@ pub async fn run_sim_monitor(cfg: Config) -> Result<()> {
     let db = WeatherTradeStore::connect(&database_url)
         .await
         .context("falha ao conectar no PostgreSQL do sim_monitor")?;
-    let rows = db
+    let mut rows = db
         .list_trades()
         .await
         .context("falha ao carregar historico do banco")?;
+    rows.retain(|row| row.execution_mode == "paper");
 
     print_sim_banner(&cfg);
 
@@ -85,7 +88,18 @@ pub async fn run_bot(cfg: Config) -> Result<()> {
         .build()?;
     let weather = Arc::new(WeatherClient::new()?);
 
+    let mut existing_rows = Vec::new();
     let mode = if cfg.live_trading_enabled() {
+        let database_url = std::env::var("DATABASE_URL")
+            .context("DATABASE_URL obrigatorio para persistir ordens live")?;
+        let db = WeatherTradeStore::connect(&database_url)
+            .await
+            .context("falha ao conectar no ledger live")?;
+        existing_rows = db
+            .list_trades()
+            .await
+            .context("falha ao carregar posicoes live persistidas")?;
+        existing_rows.retain(|row| row.execution_mode == "live");
         let signer = LocalSigner::from_str(&cfg.private_key)
             .context("POLYMARKET_PRIVATE_KEY invalida (hex sem 0x)")?
             .with_chain_id(Some(POLYGON));
@@ -99,13 +113,13 @@ pub async fn run_bot(cfg: Config) -> Result<()> {
         .await
         .context("falha ao autenticar no CLOB")?;
         info!("wallet = {:?}", signer.address());
-        EngineMode::Live { clob, signer }
+        EngineMode::Live { clob, signer, db }
     } else {
         EngineMode::DryBot
     };
 
     print_bot_banner(&cfg);
-    run_engine(cfg, http, weather, mode, Vec::new(), BotRunMode::Bot).await
+    run_engine(cfg, http, weather, mode, existing_rows, BotRunMode::Bot).await
 }
 
 #[derive(Clone)]
@@ -117,6 +131,7 @@ enum EngineMode {
     Live {
         clob: AuthClient,
         signer: PrivateKeySigner,
+        db: WeatherTradeStore,
     },
     DryBot,
 }
@@ -338,7 +353,11 @@ async fn refresh_discovery(
             market_key.clone(),
             MarketRuntime {
                 discovered: discovered_market,
-                latest_quote: if feed.is_ready() { feed.get_quote() } else { None },
+                latest_quote: if feed.is_ready() {
+                    feed.get_quote()
+                } else {
+                    None
+                },
                 latest_forecast: None,
                 latest_trend: analyze_trend(&[], 0.0),
                 last_eval: None,
@@ -390,7 +409,10 @@ async fn handle_event(
             runtime.latest_trend = trend;
             maybe_evaluate_market(cfg, mode, runtime, open_positions, run_mode).await?;
         }
-        InternalEvent::Consensus { market_key, consensus } => {
+        InternalEvent::Consensus {
+            market_key,
+            consensus,
+        } => {
             // Armazena consensus no runtime do mercado que disparou o evento
             if let Some(runtime) = runtimes.get_mut(&market_key) {
                 // Atualiza streak de confiança: conta ciclos consecutivos com alta confiança
@@ -455,26 +477,39 @@ async fn handle_event(
 
             // Constrói o grupo de mercados para avaliação cross-market
             // (coleta referências sem borrow duplo — usa snapshots)
+            let now_ts = Utc::now().timestamp();
             let group_snapshot: Vec<(String, crate::markets::TempMarket)> = group_keys
                 .iter()
-                .filter_map(|k| runtimes.get(k))
-                .map(|rt| (rt.discovered.market_key.clone(), rt.discovered.market.clone()))
+                .filter_map(|k| {
+                    let rt = runtimes.get(k)?;
+                    let quote = rt.latest_quote?;
+                    if now_ts.saturating_sub(quote.ts) > cfg.max_quote_age_secs {
+                        return None;
+                    }
+                    let mut market = rt.discovered.market.clone();
+                    market.yes_price = quote.best_buy_price(Side::Yes)?;
+                    market.no_price = quote.best_buy_price(Side::No)?;
+                    Some((rt.discovered.market_key.clone(), market))
+                })
                 .collect();
 
-            let group_refs: Vec<(&String, &crate::markets::TempMarket)> = group_snapshot
-                .iter()
-                .map(|(k, m)| (k, m))
-                .collect();
+            let group_refs: Vec<(&String, &crate::markets::TempMarket)> =
+                group_snapshot.iter().map(|(k, m)| (k, m)).collect();
 
             let cross_decisions = evaluate_cross_market_group(
                 &group_refs,
                 consensus.predicted_temp,
                 consensus.confidence,
+                consensus.uncertainty,
                 cfg,
             );
 
             // Executa decisões cross-market para cada mercado
             for cross_decision in cross_decisions {
+                if open_positions.len() >= cfg.max_open_positions {
+                    warn!("limite global de posicoes abertas atingido");
+                    break;
+                }
                 let market_key_for_exec = cross_decision.market_key.clone();
                 let Some(runtime) = runtimes.get_mut(&market_key_for_exec) else {
                     continue;
@@ -486,10 +521,20 @@ async fn handle_event(
                 let Some(quote) = runtime.latest_quote else {
                     continue;
                 };
+                if Utc::now().timestamp().saturating_sub(quote.ts) > cfg.max_quote_age_secs {
+                    continue;
+                }
 
-                let (side, token_id, shares, size_usdc, price, reason, strategy_type) =
+                let (side, token_id, _shares, size_usdc, price, reason, strategy_type) =
                     match &cross_decision.opportunity.decision {
-                        Decision::BuyYes { token_id, shares, size_usdc, price, reason, .. } => (
+                        Decision::BuyYes {
+                            token_id,
+                            shares,
+                            size_usdc,
+                            price,
+                            reason,
+                            ..
+                        } => (
                             Side::Yes,
                             token_id.clone(),
                             *shares,
@@ -498,7 +543,14 @@ async fn handle_event(
                             reason.clone(),
                             "cross_market_yes".to_string(),
                         ),
-                        Decision::BuyNo { token_id, shares, size_usdc, price, reason, .. } => (
+                        Decision::BuyNo {
+                            token_id,
+                            shares,
+                            size_usdc,
+                            price,
+                            reason,
+                            ..
+                        } => (
                             Side::No,
                             token_id.clone(),
                             *shares,
@@ -519,6 +571,21 @@ async fn handle_event(
                     Side::Yes => quote.best_buy_price(Side::Yes).unwrap_or(price),
                     Side::No => quote.best_buy_price(Side::No).unwrap_or(price),
                 };
+                let actual_edge = cross_decision.opportunity.effective_confidence - actual_price;
+                let actual_shares = if actual_price > 0.0 {
+                    (size_usdc / actual_price).floor() as u32
+                } else {
+                    0
+                };
+                let actual_ev = actual_shares as f64 * actual_edge;
+                if actual_edge < cfg.edge_min || actual_ev <= 0.0 || actual_shares == 0 {
+                    continue;
+                }
+                if let Some(spread) = quote.spread(side) {
+                    if spread * 100.0 > cfg.max_spread_cents {
+                        continue;
+                    }
+                }
 
                 let position = PositionRecord {
                     market_key: runtime.discovered.market_key.clone(),
@@ -540,13 +607,13 @@ async fn handle_event(
                     token_id,
                     size_usdc,
                     entry_price: actual_price,
-                    shares,
+                    shares: actual_shares,
                     predicted_temp: consensus.predicted_temp,
                     unit: runtime.discovered.market.unit,
                     confidence: consensus.confidence,
                     effective_confidence: cross_decision.opportunity.effective_confidence,
-                    expected_value: cross_decision.opportunity.expected_value,
-                    edge_per_share: cross_decision.opportunity.edge_per_share,
+                    expected_value: actual_ev,
+                    edge_per_share: actual_edge,
                     strategy_type,
                 };
 
@@ -580,6 +647,9 @@ async fn maybe_evaluate_market(
     let Some(quote) = runtime.latest_quote else {
         return Ok(());
     };
+    if Utc::now().timestamp().saturating_sub(quote.ts) > cfg.max_quote_age_secs {
+        return Ok(());
+    }
 
     let yes_buy = quote
         .best_buy_price(Side::Yes)
@@ -634,66 +704,68 @@ async fn maybe_evaluate_market(
         );
         return Ok(());
     }
+    if open_positions.len() >= cfg.max_open_positions {
+        info!(
+            "[{}] skip | limite global de posicoes abertas",
+            runtime.discovered.city
+        );
+        return Ok(());
+    }
 
-    let (side, token_id, shares, size_usdc, price, reason, strategy_type) = match &opportunity.decision
-    {
-        Decision::BuyYes {
-            token_id,
-            shares,
-            size_usdc,
-            price,
-            reason,
-            ..
-        } => (
-            Side::Yes,
-            token_id.clone(),
-            *shares,
-            decimal_to_f64(*size_usdc),
-            *price,
-            reason.clone(),
-            opportunity.strategy_kind.as_str().to_string(),
-        ),
-        Decision::BuyNo {
-            token_id,
-            shares,
-            size_usdc,
-            price,
-            reason,
-            ..
-        } => (
-            Side::No,
-            token_id.clone(),
-            *shares,
-            decimal_to_f64(*size_usdc),
-            *price,
-            reason.clone(),
-            opportunity.strategy_kind.as_str().to_string(),
-        ),
-        Decision::Skip(reason) => {
-            info!(
-                "[{}] skip | {} | {}",
-                runtime.discovered.city, change_reason, reason
-            );
-            return Ok(());
-        }
-    };
+    let (side, token_id, shares, size_usdc, price, reason, strategy_type) =
+        match &opportunity.decision {
+            Decision::BuyYes {
+                token_id,
+                shares,
+                size_usdc,
+                price,
+                reason,
+                ..
+            } => (
+                Side::Yes,
+                token_id.clone(),
+                *shares,
+                decimal_to_f64(*size_usdc),
+                *price,
+                reason.clone(),
+                opportunity.strategy_kind.as_str().to_string(),
+            ),
+            Decision::BuyNo {
+                token_id,
+                shares,
+                size_usdc,
+                price,
+                reason,
+                ..
+            } => (
+                Side::No,
+                token_id.clone(),
+                *shares,
+                decimal_to_f64(*size_usdc),
+                *price,
+                reason.clone(),
+                opportunity.strategy_kind.as_str().to_string(),
+            ),
+            Decision::Skip(reason) => {
+                info!(
+                    "[{}] skip | {} | {}",
+                    runtime.discovered.city, change_reason, reason
+                );
+                return Ok(());
+            }
+        };
 
     if opportunity.edge_per_share < cfg.edge_min {
         info!(
             "[{}] skip-edge | edge/share={:+.3} < {:.3} | {}",
-            runtime.discovered.city,
-            opportunity.edge_per_share,
-            cfg.edge_min,
-            change_reason
+            runtime.discovered.city, opportunity.edge_per_share, cfg.edge_min, change_reason
         );
         return Ok(());
     }
     if opportunity.expected_value <= 0.0 {
         info!(
             "[{}] skip-ev | EV={:+.2} | {}",
-            runtime.discovered.city,
-            opportunity.expected_value,
-            change_reason
+            runtime.discovered.city, opportunity.expected_value, change_reason
         );
         return Ok(());
     }
@@ -740,7 +812,16 @@ async fn maybe_evaluate_market(
         strategy_type,
     };
 
-    execute_entry(mode, runtime, open_positions, position, &reason, &change_reason, run_mode).await
+    execute_entry(
+        mode,
+        runtime,
+        open_positions,
+        position,
+        &reason,
+        &change_reason,
+        run_mode,
+    )
+    .await
 }
 
 async fn execute_entry(
@@ -772,6 +853,8 @@ async fn execute_entry(
                 Some(position.expected_value),
                 Some(position.edge_per_share),
                 Some(&position.strategy_type),
+                "paper",
+                None,
                 &Local::now().to_rfc3339(),
                 Local::now().timestamp(),
             )
@@ -788,9 +871,9 @@ async fn execute_entry(
             runtime.position_open = true;
             open_positions.insert(position.market_key.clone(), position);
         }
-        EngineMode::Live { clob, signer } => {
-            let price_dec =
-                Decimal::from_str(&format!("{:.6}", position.entry_price)).context("preco invalido")?;
+        EngineMode::Live { clob, signer, db } => {
+            let price_dec = Decimal::from_str(&format!("{:.6}", position.entry_price))
+                .context("preco invalido")?;
             let size_dec = Decimal::from_str(&format!("{:.6}", position.size_usdc))
                 .context("size_usdc invalido")?;
             let shares = if price_dec > Decimal::ZERO {
@@ -805,16 +888,49 @@ async fn execute_entry(
                 .size(shares)
                 .price(price_dec)
                 .side(PolySide::Buy)
+                .order_type(OrderType::FOK)
                 .build()
                 .await?;
             let signed = clob.sign(signer, order).await?;
             let resp = clob.post_order(signed).await?;
 
+            if !resp.success || !matches!(resp.status, OrderStatusType::Matched) {
+                anyhow::bail!(
+                    "ordem FOK nao executada: status={} erro={}",
+                    resp.status,
+                    resp.error_msg.as_deref().unwrap_or("sem detalhe")
+                );
+            }
+
+            db.insert_open_trade(
+                &position.market_key,
+                &position.city,
+                &position.target_date.to_string(),
+                &position.icao,
+                &position.resolution_source,
+                &position.question,
+                &position.direction,
+                &position.token_id,
+                position.size_usdc,
+                position.entry_price,
+                position.predicted_temp,
+                position.unit.symbol(),
+                position.confidence,
+                Some(position.effective_confidence),
+                Some(position.expected_value),
+                Some(position.edge_per_share),
+                Some(&position.strategy_type),
+                "live",
+                Some(&resp.order_id),
+                &Local::now().to_rfc3339(),
+                Local::now().timestamp(),
+            )
+            .await?;
+
             log_entry(&position, decision_reason, change_reason, run_mode, false);
             info!(
                 "[{}] order-posted | order_id={:?}",
-                position.city,
-                resp
+                position.city, resp.order_id
             );
             runtime.position_open = true;
             open_positions.insert(position.market_key.clone(), position);
@@ -979,10 +1095,7 @@ fn load_open_positions(rows: &[WeatherTradeRow]) -> HashMap<String, PositionReco
                     effective_confidence: row.effective_confidence.unwrap_or(row.confidence),
                     expected_value: row.expected_value.unwrap_or(0.0),
                     edge_per_share: row.edge_per_share.unwrap_or(0.0),
-                    strategy_type: row
-                        .strategy_type
-                        .clone()
-                        .unwrap_or_else(|| "legacy".into()),
+                    strategy_type: row.strategy_type.clone().unwrap_or_else(|| "legacy".into()),
                 },
             ))
         })
@@ -1025,7 +1138,11 @@ fn log_entry(
         position.edge_per_share,
         position.strategy_type,
     );
-    println!("          change={} | {}", change_reason, truncate(decision_reason, 110));
+    println!(
+        "          change={} | {}",
+        change_reason,
+        truncate(decision_reason, 110)
+    );
 }
 
 fn log_resolution(
@@ -1096,9 +1213,7 @@ fn print_bot_banner(cfg: &Config) {
     );
     println!(
         "  discovery {}s | intraday {}s | spread max {:.1}c",
-        cfg.discovery_refresh_secs,
-        cfg.weather_intraday_poll_secs,
-        cfg.max_spread_cents,
+        cfg.discovery_refresh_secs, cfg.weather_intraday_poll_secs, cfg.max_spread_cents,
     );
     println!("-------------------------------------------------------");
 }
@@ -1122,6 +1237,8 @@ fn weather_row_from_position(position: &PositionRecord) -> WeatherTradeRow {
         expected_value: Some(position.expected_value),
         edge_per_share: Some(position.edge_per_share),
         strategy_type: Some(position.strategy_type.clone()),
+        execution_mode: "paper".into(),
+        order_id: None,
         status: "pending".into(),
         actual_temp: None,
         pnl: None,
@@ -1147,17 +1264,17 @@ fn print_book_report(rows: &[WeatherTradeRow]) {
     println!("Resolvidos: {}", resolved.len());
     println!("Wins: {}", wins);
     if !resolved.is_empty() {
-        println!("Win rate: {:.1}%", wins as f64 * 100.0 / resolved.len() as f64);
+        println!(
+            "Win rate: {:.1}%",
+            wins as f64 * 100.0 / resolved.len() as f64
+        );
     }
     println!("PnL total: {:+.2} USDC", total_pnl);
     println!("EV acumulado na entrada: {:+.2} USDC", total_ev);
 
     let mut by_strategy: HashMap<String, (usize, usize, f64)> = HashMap::new();
     for row in rows {
-        let strategy = row
-            .strategy_type
-            .clone()
-            .unwrap_or_else(|| "legacy".into());
+        let strategy = row.strategy_type.clone().unwrap_or_else(|| "legacy".into());
         let entry = by_strategy.entry(strategy).or_insert((0, 0, 0.0));
         entry.0 += 1;
         if row.status == "won" {
@@ -1176,10 +1293,7 @@ fn print_book_report(rows: &[WeatherTradeRow]) {
         };
         println!(
             "  {:18} {:4} trades  {:5.1}% win  PnL {:+8.2}",
-            strategy,
-            trades,
-            win_rate,
-            pnl
+            strategy, trades, win_rate, pnl
         );
     }
 }

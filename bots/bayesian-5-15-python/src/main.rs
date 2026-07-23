@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     let binance = BinanceFeed::new(&cfg.binance_base_url)?;
     let executor = ExchangeExecutor::from_config(&cfg).await?;
     let store = PaperTradeStore::connect(&cfg.paper_trades_path).await?;
-    let strategy = BayesianStrategy::new(cfg.clone());
+    let mut strategy = BayesianStrategy::new(cfg.clone());
     let mut traded_slugs = HashSet::<String>::new();
 
     loop {
@@ -48,7 +48,8 @@ async fn main() -> Result<()> {
         }
 
         let now = Utc::now();
-        let open_positions = store.list_open_trades().await?.len();
+        strategy.sync_settlements(&store.settled_results().await?);
+        let mut open_positions = store.list_open_trades().await?.len();
         let mut active_found = false;
 
         for market_cfg in &cfg.markets {
@@ -133,6 +134,7 @@ async fn main() -> Result<()> {
                     &cfg.strategy_version,
                 )
                 .await?;
+            open_positions += 1;
 
             info!(
                 "{} | {} | {} @ {:.3} | stake=${:.2} | simulated={}",

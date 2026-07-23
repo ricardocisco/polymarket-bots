@@ -10,6 +10,7 @@ pub struct Config {
     pub private_key: String,
     pub min_confidence: f64,
     pub max_position_size_usdc: Decimal,
+    pub bankroll_usdc: Decimal,
     pub min_order_size_usdc: Decimal,
     pub run_interval_secs: u64,
 
@@ -64,6 +65,8 @@ pub struct Config {
     pub edge_min: f64,
     /// Spread máximo tolerado para executar.
     pub max_spread_cents: f64,
+    pub max_quote_age_secs: i64,
+    pub max_open_positions: usize,
     /// Revisão mínima de forecast para reavaliar imediatamente.
     pub forecast_change_trigger_degrees: f64,
     /// Mudança mínima no preço implícito para reavaliar imediatamente.
@@ -89,7 +92,7 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
 
-        Ok(Config {
+        let cfg = Config {
             private_key: std::env::var("POLYMARKET_PRIVATE_KEY")
                 .context("POLYMARKET_PRIVATE_KEY não definida. Configure no arquivo .env")?,
 
@@ -105,6 +108,10 @@ impl Config {
             )
             .context("MAX_POSITION_SIZE_USDC inválido")?,
 
+            bankroll_usdc: Decimal::from_str(
+                &std::env::var("BANKROLL_USDC").unwrap_or_else(|_| "100.0".into()),
+            )
+            .context("BANKROLL_USDC invalido")?,
             min_order_size_usdc: Decimal::from_str(
                 &std::env::var("MIN_ORDER_SIZE_USDC").unwrap_or_else(|_| "1.0".into()),
             )
@@ -210,6 +217,14 @@ impl Config {
                 .parse::<f64>()
                 .context("MAX_SPREAD_CENTS deve ser float (ex: 5.0)")?,
 
+            max_quote_age_secs: std::env::var("MAX_QUOTE_AGE_SECS")
+                .unwrap_or_else(|_| "15".into())
+                .parse::<i64>()
+                .context("MAX_QUOTE_AGE_SECS deve ser inteiro positivo")?,
+            max_open_positions: std::env::var("MAX_OPEN_POSITIONS")
+                .unwrap_or_else(|_| "10".into())
+                .parse::<usize>()
+                .context("MAX_OPEN_POSITIONS deve ser inteiro positivo")?,
             forecast_change_trigger_degrees: std::env::var("FORECAST_CHANGE_TRIGGER_DEGREES")
                 .unwrap_or_else(|_| "0.4".into())
                 .parse::<f64>()
@@ -231,7 +246,7 @@ impl Config {
                 .context("SOURCE_AGREEMENT_THRESHOLD deve ser float em graus (ex: 1.5)")?,
 
             consensus_min_confidence: std::env::var("CONSENSUS_MIN_CONFIDENCE")
-                .unwrap_or_else(|_| "0.80".into())
+                .unwrap_or_else(|_| "0.50".into())
                 .parse::<f64>()
                 .context("CONSENSUS_MIN_CONFIDENCE deve ser float (ex: 0.80)")?,
 
@@ -244,7 +259,9 @@ impl Config {
                 .unwrap_or_else(|_| "2".into())
                 .parse::<usize>()
                 .context("CROSS_MARKET_BINS_RADIUS deve ser inteiro positivo")?,
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// Live trading ativo apenas quando DRY_RUN=false E ALLOW_LIVE_TRADING=true.
@@ -256,7 +273,7 @@ impl Config {
     pub fn from_env_without_private_key() -> Result<Self> {
         dotenvy::dotenv().ok();
 
-        Ok(Config {
+        let cfg = Config {
             private_key: std::env::var("POLYMARKET_PRIVATE_KEY").unwrap_or_default(),
             min_confidence: std::env::var("MIN_CONFIDENCE")
                 .unwrap_or_else(|_| "0.72".into())
@@ -266,6 +283,10 @@ impl Config {
                 &std::env::var("MAX_POSITION_SIZE_USDC").unwrap_or_else(|_| "10.0".into()),
             )
             .context("MAX_POSITION_SIZE_USDC inválido")?,
+            bankroll_usdc: Decimal::from_str(
+                &std::env::var("BANKROLL_USDC").unwrap_or_else(|_| "100.0".into()),
+            )
+            .context("BANKROLL_USDC invalido")?,
             min_order_size_usdc: Decimal::from_str(
                 &std::env::var("MIN_ORDER_SIZE_USDC").unwrap_or_else(|_| "1.0".into()),
             )
@@ -350,6 +371,14 @@ impl Config {
                 .unwrap_or_else(|_| "5.0".into())
                 .parse::<f64>()
                 .context("MAX_SPREAD_CENTS deve ser float (ex: 5.0)")?,
+            max_quote_age_secs: std::env::var("MAX_QUOTE_AGE_SECS")
+                .unwrap_or_else(|_| "15".into())
+                .parse::<i64>()
+                .context("MAX_QUOTE_AGE_SECS deve ser inteiro positivo")?,
+            max_open_positions: std::env::var("MAX_OPEN_POSITIONS")
+                .unwrap_or_else(|_| "10".into())
+                .parse::<usize>()
+                .context("MAX_OPEN_POSITIONS deve ser inteiro positivo")?,
             forecast_change_trigger_degrees: std::env::var("FORECAST_CHANGE_TRIGGER_DEGREES")
                 .unwrap_or_else(|_| "0.4".into())
                 .parse::<f64>()
@@ -367,7 +396,7 @@ impl Config {
                 .parse::<f64>()
                 .context("SOURCE_AGREEMENT_THRESHOLD deve ser float em graus (ex: 1.5)")?,
             consensus_min_confidence: std::env::var("CONSENSUS_MIN_CONFIDENCE")
-                .unwrap_or_else(|_| "0.80".into())
+                .unwrap_or_else(|_| "0.50".into())
                 .parse::<f64>()
                 .context("CONSENSUS_MIN_CONFIDENCE deve ser float (ex: 0.80)")?,
             penny_no_max_price: std::env::var("PENNY_NO_MAX_PRICE")
@@ -378,7 +407,35 @@ impl Config {
                 .unwrap_or_else(|_| "2".into())
                 .parse::<usize>()
                 .context("CROSS_MARKET_BINS_RADIUS deve ser inteiro positivo")?,
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("MIN_CONFIDENCE", self.min_confidence),
+            ("PENNY_MIN_CONFIDENCE", self.penny_min_confidence),
+            ("EDGE_MIN", self.edge_min),
+            ("CONSENSUS_MIN_CONFIDENCE", self.consensus_min_confidence),
+        ] {
+            if !(0.0..=1.0).contains(&value) {
+                anyhow::bail!("{name} deve estar entre 0 e 1");
+            }
+        }
+        if self.bankroll_usdc <= Decimal::ZERO
+            || self.max_position_size_usdc <= Decimal::ZERO
+            || self.min_order_size_usdc <= Decimal::ZERO
+        {
+            anyhow::bail!("bankroll e tamanhos de ordem devem ser positivos");
+        }
+        if self.max_position_size_usdc > self.bankroll_usdc {
+            anyhow::bail!("MAX_POSITION_SIZE_USDC nao pode exceder BANKROLL_USDC");
+        }
+        if self.max_quote_age_secs <= 0 || self.max_open_positions == 0 {
+            anyhow::bail!("limites de quote e posicoes devem ser positivos");
+        }
+        Ok(())
     }
 
     pub fn with_runtime_overrides(

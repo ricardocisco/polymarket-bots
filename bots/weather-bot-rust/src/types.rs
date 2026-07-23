@@ -73,6 +73,8 @@ pub struct ConsensusResult {
     pub confidence: f64,
     /// Spread entre a fonte mais quente e a mais fria (em graus)
     pub spread: f64,
+    /// Desvio-padrao preditivo, combinando erro intrinseco e desacordo entre fontes.
+    pub uncertainty: f64,
     /// Número de fontes que contribuíram para este consensus
     pub sources_count: usize,
     /// Fontes individuais
@@ -106,6 +108,8 @@ pub struct Forecast {
     /// - Bot real: calculada pela estabilidade dos 3 dias de previsão
     /// - Backtest: 1.0 (dado real histórico confirmado)
     pub confidence: f64,
+    /// Desvio-padrao esperado da temperatura maxima, na unidade do mercado.
+    pub uncertainty: f64,
 }
 
 /// Snapshot de temperatura de uma hora específica (dados intradiários do Open-Meteo).
@@ -173,7 +177,7 @@ impl QuoteSnapshot {
 
     #[must_use]
     pub fn spread(&self, side: Side) -> Option<f64> {
-        Some(self.best_sell_price(side)? - self.best_buy_price(side)?)
+        Some(self.best_buy_price(side)? - self.best_sell_price(side)?)
             .filter(|spread| spread.is_finite() && *spread >= 0.0)
     }
 }

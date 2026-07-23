@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use reqwest::Url;
 use tokio::time::sleep;
 
-use crate::types::{PriceHistoryResponse, PricePoint, PriceResponse, QuoteSnapshot};
+use crate::types::{deserialize_string_or_number, PriceHistoryResponse, PricePoint, QuoteSnapshot};
+use serde::Deserialize;
 
 pub struct ClobOrderbookFeed {
     http: reqwest::Client,
@@ -22,33 +23,26 @@ impl ClobOrderbookFeed {
         })
     }
 
-    pub async fn buy_price(&self, token_id: &str) -> Result<f64> {
-        let mut url = Url::parse(&format!("{}/price", self.base_url.trim_end_matches('/')))?;
-        url.query_pairs_mut()
-            .append_pair("token_id", token_id)
-            .append_pair("side", "BUY");
-
-        let resp: PriceResponse = self
+    pub async fn quote_for_token(&self, token_id: &str) -> Result<QuoteSnapshot> {
+        let mut url = Url::parse(&format!("{}/book", self.base_url.trim_end_matches('/')))?;
+        url.query_pairs_mut().append_pair("token_id", token_id);
+        let book: OrderBookResponse = self
             .http
             .get(url)
             .send()
             .await
-            .context("falha ao consultar preco de compra")?
+            .context("falha ao consultar /book")?
             .error_for_status()
-            .context("erro HTTP em /price")?
+            .context("erro HTTP em /book")?
             .json()
             .await
-            .context("falha ao parsear /price")?;
-
-        Ok(resp.price)
-    }
-
-    pub async fn quote_for_token(&self, token_id: &str) -> Result<QuoteSnapshot> {
-        let price = self.buy_price(token_id).await?;
+            .context("falha ao parsear /book")?;
+        let ask = book.asks.first().context("order book sem asks")?;
         Ok(QuoteSnapshot {
-            best_bid: None,
-            best_ask: Some(price),
-            last_price: Some(price),
+            best_bid: book.bids.first().map(|level| level.price),
+            best_ask: Some(ask.price),
+            last_price: Some(ask.price),
+            ask_size: Some(ask.size),
         })
     }
 
@@ -116,4 +110,20 @@ impl ClobOrderbookFeed {
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("falha desconhecida em /prices-history")))
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct OrderBookResponse {
+    #[serde(default)]
+    bids: Vec<BookLevel>,
+    #[serde(default)]
+    asks: Vec<BookLevel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BookLevel {
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    price: f64,
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    size: f64,
 }

@@ -399,10 +399,10 @@ pub fn extract_icao_and_source(description: &str) -> Option<(String, String)> {
 
     if segment.is_empty() {
         // Tentativa alternativa: procura qualquer token ICAO entre colchetes/parênteses
-        if let Some(cap) = regex::Regex::new(r"\[([A-Z]{3,4})\]")
-            .ok()
-            .and_then(|re| re.captures(description).and_then(|c| c.get(1).map(|m| m.as_str().to_string())))
-        {
+        if let Some(cap) = regex::Regex::new(r"\[([A-Z]{3,4})\]").ok().and_then(|re| {
+            re.captures(description)
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+        }) {
             let icao = cap;
             let city = "".to_string();
             let country = "".to_string();
@@ -512,12 +512,12 @@ pub fn parse_temp_range(q: &str) -> (Option<f64>, Option<f64>) {
         if let Some(a) = first_number(after) {
             if let Some(and_pos) = after.to_lowercase().find(" and ") {
                 if let Some(b) = first_number(&after[and_pos + 5..]) {
-                    return (Some(a), Some(b));
+                    return (Some(a - 0.5), Some(b + 0.5));
                 }
             }
             // Fallback: "between 84-85°F" usa hífen em vez de "and"
             if let Some(range) = parse_hyphen_range(after) {
-                return range;
+                return (range.0.map(|v| v - 0.5), range.1.map(|v| v + 0.5));
             }
         }
     }
@@ -526,7 +526,7 @@ pub fn parse_temp_range(q: &str) -> (Option<f64>, Option<f64>) {
     for kw in &["or higher", "or above"] {
         if let Some(pos) = lower.find(kw) {
             if let Some(n) = last_number_before(&q[..pos]) {
-                return (Some(n), None);
+                return (Some(n - 0.5), None);
             }
         }
     }
@@ -535,32 +535,38 @@ pub fn parse_temp_range(q: &str) -> (Option<f64>, Option<f64>) {
     for kw in &["or lower", "or below"] {
         if let Some(pos) = lower.find(kw) {
             if let Some(n) = last_number_before(&q[..pos]) {
-                return (None, Some(n));
+                return (None, Some(n + 0.5));
             }
         }
     }
 
     // "above X" / "at least X"
-    for kw in &["above ", "at least "] {
-        if let Some(pos) = lower.find(kw) {
-            if let Some(n) = first_number(&q[pos + kw.len()..]) {
-                return (Some(n), None);
-            }
+    if let Some(pos) = lower.find("above ") {
+        if let Some(n) = first_number(&q[pos + 6..]) {
+            return (Some(n + 0.5), None);
+        }
+    }
+    if let Some(pos) = lower.find("at least ") {
+        if let Some(n) = first_number(&q[pos + 9..]) {
+            return (Some(n - 0.5), None);
         }
     }
 
     // "below X" / "at most X"
-    for kw in &["below ", "at most "] {
-        if let Some(pos) = lower.find(kw) {
-            if let Some(n) = first_number(&q[pos + kw.len()..]) {
-                return (None, Some(n));
-            }
+    if let Some(pos) = lower.find("below ") {
+        if let Some(n) = first_number(&q[pos + 6..]) {
+            return (None, Some(n - 0.5));
+        }
+    }
+    if let Some(pos) = lower.find("at most ") {
+        if let Some(n) = first_number(&q[pos + 8..]) {
+            return (None, Some(n + 0.5));
         }
     }
 
     // "60-61°F" — range com hífen
     if let Some(range) = parse_hyphen_range(q) {
-        return range;
+        return (range.0.map(|v| v - 0.5), range.1.map(|v| v + 0.5));
     }
 
     // Número isolado: "15°C" → exato ±0.5
@@ -654,32 +660,32 @@ mod tests {
     }
     #[test]
     fn range_hyphen() {
-        assert_eq!(parse_temp_range("60-61°F"), (Some(60.0), Some(61.0)));
+        assert_eq!(parse_temp_range("60-61°F"), (Some(59.5), Some(61.5)));
     }
     #[test]
     fn range_higher() {
-        assert_eq!(parse_temp_range("19°C or higher"), (Some(19.0), None));
+        assert_eq!(parse_temp_range("19°C or higher"), (Some(18.5), None));
     }
     #[test]
     fn range_below() {
-        assert_eq!(parse_temp_range("36°C or below"), (None, Some(36.0)));
+        assert_eq!(parse_temp_range("36°C or below"), (None, Some(36.5)));
     }
     #[test]
     fn range_between() {
         assert_eq!(
             parse_temp_range("between 8°C and 10°C"),
-            (Some(8.0), Some(10.0))
+            (Some(7.5), Some(10.5))
         );
     }
     #[test]
     fn range_f_below() {
-        assert_eq!(parse_temp_range("63°F or below"), (None, Some(63.0)));
+        assert_eq!(parse_temp_range("63°F or below"), (None, Some(63.5)));
     }
     #[test]
     fn range_between_hyphen() {
         assert_eq!(
             parse_temp_range("between 84-85°F"),
-            (Some(84.0), Some(85.0))
+            (Some(83.5), Some(85.5))
         );
     }
 }

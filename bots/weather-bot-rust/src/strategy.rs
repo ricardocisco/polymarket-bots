@@ -27,7 +27,11 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-use crate::{config::Config, markets::TempMarket, types::{Forecast, TrendAnalysis}};
+use crate::{
+    config::Config,
+    markets::TempMarket,
+    types::{Forecast, TrendAnalysis},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyKind {
@@ -85,7 +89,7 @@ pub struct Opportunity {
 
 #[derive(Debug, Clone, Copy)]
 struct EvalSnapshot {
-    eff_conf: f64,
+    yes_probability: f64,
 }
 
 fn estimate_edge_per_share(price: f64, probability: f64) -> f64 {
@@ -103,7 +107,6 @@ fn estimate_expected_value(size_usdc: Decimal, price: f64, probability: f64) -> 
 }
 
 fn range_snapshot(market: &TempMarket, forecast: &Forecast) -> Option<EvalSnapshot> {
-    let predicted = forecast.max_temp;
     let (range_min, range_max) = match (market.range_min, market.range_max) {
         (Some(a), Some(b)) => (a, b),
         (Some(a), None) => (a, f64::INFINITY),
@@ -111,29 +114,13 @@ fn range_snapshot(market: &TempMarket, forecast: &Forecast) -> Option<EvalSnapsh
         (None, None) => return None,
     };
 
-    let in_range = predicted >= range_min - 0.05 && predicted <= range_max + 0.05;
-    let safety_margin = if in_range {
-        let d_min = predicted - range_min;
-        let d_max = if range_max.is_finite() {
-            range_max - predicted
-        } else {
-            5.0
-        };
-        d_min.min(d_max)
-    } else if predicted < range_min {
-        predicted - range_min
-    } else {
-        range_max - predicted
-    };
-
-    let margin_bonus = if safety_margin.is_finite() {
-        (safety_margin / 4.0).clamp(-0.10, 0.04)
-    } else {
-        0.0
-    };
-
     Some(EvalSnapshot {
-        eff_conf: (forecast.confidence + margin_bonus).clamp(0.0, 0.999),
+        yes_probability: probability_in_range(
+            forecast.max_temp,
+            forecast.uncertainty,
+            range_min,
+            range_max,
+        ),
     })
 }
 
@@ -146,7 +133,7 @@ pub fn evaluate_opportunity(market: &TempMarket, forecast: &Forecast, cfg: &Conf
             size_usdc, price, ..
         } => {
             let snap = snapshot.unwrap_or(EvalSnapshot {
-                eff_conf: forecast.confidence,
+                yes_probability: forecast.confidence,
             });
             (
                 if cfg.penny_shares > 0 {
@@ -154,8 +141,8 @@ pub fn evaluate_opportunity(market: &TempMarket, forecast: &Forecast, cfg: &Conf
                 } else {
                     StrategyKind::Kelly
                 },
-                snap.eff_conf,
-                snap.eff_conf,
+                snap.yes_probability,
+                snap.yes_probability,
                 *size_usdc,
                 *price,
             )
@@ -164,7 +151,7 @@ pub fn evaluate_opportunity(market: &TempMarket, forecast: &Forecast, cfg: &Conf
             size_usdc, price, ..
         } => {
             let snap = snapshot.unwrap_or(EvalSnapshot {
-                eff_conf: forecast.confidence,
+                yes_probability: 1.0 - forecast.confidence,
             });
             (
                 if cfg.penny_shares > 0 {
@@ -172,8 +159,8 @@ pub fn evaluate_opportunity(market: &TempMarket, forecast: &Forecast, cfg: &Conf
                 } else {
                     StrategyKind::Kelly
                 },
-                snap.eff_conf,
-                snap.eff_conf,
+                1.0 - snap.yes_probability,
+                1.0 - snap.yes_probability,
                 *size_usdc,
                 *price,
             )
@@ -184,8 +171,12 @@ pub fn evaluate_opportunity(market: &TempMarket, forecast: &Forecast, cfg: &Conf
             } else {
                 StrategyKind::Kelly
             },
-            snapshot.map(|s| s.eff_conf).unwrap_or(forecast.confidence),
-            snapshot.map(|s| s.eff_conf).unwrap_or(forecast.confidence),
+            snapshot
+                .map(|s| s.yes_probability.max(1.0 - s.yes_probability))
+                .unwrap_or(forecast.confidence),
+            snapshot
+                .map(|s| s.yes_probability.max(1.0 - s.yes_probability))
+                .unwrap_or(forecast.confidence),
             Decimal::ZERO,
             0.0,
         ),
@@ -244,13 +235,19 @@ pub fn evaluate(market: &TempMarket, forecast: &Forecast, cfg: &Config) -> Decis
 
     // Bônus/penalidade de confiança pela margem
     // Margem > 2°C → +4% de confiança; margem < 0 → -10%
-    let margin_bonus = if safety_margin.is_finite() {
+    let _margin_bonus = if safety_margin.is_finite() {
         (safety_margin / 4.0).clamp(-0.10, 0.04)
     } else {
         0.0
     };
 
-    let eff_conf = (forecast.confidence + margin_bonus).clamp(0.0, 0.999);
+    let yes_probability =
+        probability_in_range(predicted, forecast.uncertainty, range_min, range_max);
+    let eff_conf = if in_range {
+        yes_probability
+    } else {
+        1.0 - yes_probability
+    };
 
     let range_str = format!(
         "[{} – {}]",
@@ -509,10 +506,7 @@ pub fn evaluate_with_trend(
             // Máxima real FORA do range → BUY NO antecipado
             let size = kelly_size(market.no_price, eff_conf, cfg);
             if size < cfg.min_order_size_usdc {
-                return Decision::Skip(format!(
-                    "Kelly pequeno ({:.2}) | {}",
-                    size, reason_prefix
-                ));
+                return Decision::Skip(format!("Kelly pequeno ({:.2}) | {}", size, reason_prefix));
             }
             let shares = if market.no_price > 0.0 {
                 (size.to_string().parse::<f64>().unwrap_or(0.0) / market.no_price).round() as u32
@@ -528,17 +522,18 @@ pub fn evaluate_with_trend(
                 neg_risk: market.neg_risk,
                 reason: format!(
                     "{} | {:.1}{} FORA {} | Conf={:.1}%",
-                    reason_prefix, actual_max, unit_sym, range_str, eff_conf * 100.0
+                    reason_prefix,
+                    actual_max,
+                    unit_sym,
+                    range_str,
+                    eff_conf * 100.0
                 ),
             };
         } else {
             // Máxima real DENTRO do range → BUY YES antecipado
             let size = kelly_size(market.yes_price, eff_conf, cfg);
             if size < cfg.min_order_size_usdc {
-                return Decision::Skip(format!(
-                    "Kelly pequeno ({:.2}) | {}",
-                    size, reason_prefix
-                ));
+                return Decision::Skip(format!("Kelly pequeno ({:.2}) | {}", size, reason_prefix));
             }
             let shares = if market.yes_price > 0.0 {
                 (size.to_string().parse::<f64>().unwrap_or(0.0) / market.yes_price).round() as u32
@@ -554,7 +549,11 @@ pub fn evaluate_with_trend(
                 neg_risk: market.neg_risk,
                 reason: format!(
                     "{} | {:.1}{} DENTRO {} | Conf={:.1}%",
-                    reason_prefix, actual_max, unit_sym, range_str, eff_conf * 100.0
+                    reason_prefix,
+                    actual_max,
+                    unit_sym,
+                    range_str,
+                    eff_conf * 100.0
                 ),
             };
         }
@@ -584,6 +583,7 @@ pub fn evaluate_with_trend(
             max_temp: blended_temp,
             unit: forecast.unit,
             confidence: combined_conf,
+            uncertainty: forecast.uncertainty.min(1.0),
         };
         evaluate(market, &blended_forecast, cfg)
     } else {
@@ -593,6 +593,7 @@ pub fn evaluate_with_trend(
             max_temp: forecast.max_temp,
             unit: forecast.unit,
             confidence: (forecast.confidence - 0.08).max(0.30),
+            uncertainty: forecast.uncertainty * 1.25,
         };
         evaluate(market, &conservative_forecast, cfg)
     }
@@ -626,8 +627,16 @@ pub fn evaluate_opportunity_with_trend(
     } else {
         StrategyKind::Kelly
     };
+    let mean_in_range =
+        forecast.max_temp >= range_min - 0.05 && forecast.max_temp <= range_max + 0.05;
     let mut effective_confidence = base_snapshot
-        .map(|s| s.eff_conf)
+        .map(|s| {
+            if mean_in_range {
+                s.yes_probability
+            } else {
+                1.0 - s.yes_probability
+            }
+        })
         .unwrap_or(forecast.confidence);
 
     if trend_usable && peak_confirmed {
@@ -697,11 +706,44 @@ fn kelly_size(market_price: f64, our_prob: f64, cfg: &Config) -> Decimal {
         return Decimal::ZERO; // edge negativo — não entra
     }
 
-    let size = Decimal::try_from(kelly / 4.0).unwrap_or(dec!(0)) * cfg.max_position_size_usdc;
+    let size = Decimal::try_from(kelly / 4.0).unwrap_or(dec!(0)) * cfg.bankroll_usdc;
+    let capped = size.min(cfg.max_position_size_usdc).round_dp(2);
+    if capped < cfg.min_order_size_usdc {
+        Decimal::ZERO
+    } else {
+        capped
+    }
+}
 
-    size.min(cfg.max_position_size_usdc)
-        .max(cfg.min_order_size_usdc)
-        .round_dp(2)
+fn probability_in_range(mean: f64, sigma: f64, lower: f64, upper: f64) -> f64 {
+    let sigma = sigma.max(0.10);
+    let lower_cdf = if lower.is_finite() {
+        normal_cdf((lower - mean) / sigma)
+    } else {
+        0.0
+    };
+    let upper_cdf = if upper.is_finite() {
+        normal_cdf((upper - mean) / sigma)
+    } else {
+        1.0
+    };
+    (upper_cdf - lower_cdf).clamp(0.001, 0.999)
+}
+
+fn normal_cdf(value: f64) -> f64 {
+    let x = value.abs();
+    let t = 1.0 / (1.0 + 0.231_641_9 * x);
+    let density = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let tail = density
+        * t
+        * (0.319_381_530
+            + t * (-0.356_563_782
+                + t * (1.781_477_937 + t * (-1.821_255_978 + t * 1.330_274_429))));
+    if value >= 0.0 {
+        1.0 - tail
+    } else {
+        tail
+    }
 }
 
 // ── Estratégia Cross-Market (multi-bin por ICAO+data) ──────────────────────
@@ -730,9 +772,13 @@ pub fn evaluate_cross_market_group(
     markets: &[(&String, &TempMarket)],
     predicted_temp: f64,
     consensus_confidence: f64,
+    consensus_uncertainty: f64,
     cfg: &Config,
 ) -> Vec<CrossMarketDecision> {
-    if markets.is_empty() || predicted_temp.is_nan() || consensus_confidence < cfg.consensus_min_confidence {
+    if markets.is_empty()
+        || predicted_temp.is_nan()
+        || consensus_confidence < cfg.consensus_min_confidence
+    {
         return Vec::new();
     }
 
@@ -742,6 +788,7 @@ pub fn evaluate_cross_market_group(
         max_temp: predicted_temp,
         unit: market.unit,
         confidence: consensus_confidence,
+        uncertainty: consensus_uncertainty,
     };
 
     let mut decisions = Vec::new();
@@ -801,9 +848,7 @@ pub fn evaluate_cross_market_group(
         if distance_from_target <= cfg.cross_market_bins_radius {
             // Verifica se a temperatura prevista está FORA deste bin
             let is_outside_bin = match (market.range_min, market.range_max) {
-                (Some(lo), Some(hi)) => {
-                    predicted_temp < lo - 0.05 || predicted_temp > hi + 0.05
-                }
+                (Some(lo), Some(hi)) => predicted_temp < lo - 0.05 || predicted_temp > hi + 0.05,
                 (Some(lo), None) => predicted_temp < lo - 0.05,
                 (None, Some(hi)) => predicted_temp > hi + 0.05,
                 (None, None) => false,
@@ -824,8 +869,7 @@ pub fn evaluate_cross_market_group(
             let no_probability = (consensus_confidence + distance_bonus).clamp(0.0, 0.98);
 
             let shares = cfg.penny_shares.max(1);
-            let size_usdc =
-                Decimal::try_from(shares as f64 * market.no_price).unwrap_or(dec!(1));
+            let size_usdc = Decimal::try_from(shares as f64 * market.no_price).unwrap_or(dec!(1));
             let cross_reason = format!(
                 "CROSS-MARKET NO | Consensus={:.1}{} FORA range | Dist={} bin(s) | NO@{:.1}¢ | Retorno=${:.0}",
                 predicted_temp,
@@ -847,11 +891,7 @@ pub fn evaluate_cross_market_group(
                 },
                 strategy_kind: StrategyKind::Penny,
                 effective_confidence: no_probability,
-                expected_value: estimate_expected_value(
-                    size_usdc,
-                    market.no_price,
-                    no_probability,
-                ),
+                expected_value: estimate_expected_value(size_usdc, market.no_price, no_probability),
                 edge_per_share: estimate_edge_per_share(market.no_price, no_probability),
             };
 
@@ -872,7 +912,12 @@ mod cross_market_tests {
     use crate::markets::TempUnit;
     use rust_decimal_macros::dec;
 
-    fn make_market(range_min: Option<f64>, range_max: Option<f64>, yes_price: f64, no_price: f64) -> TempMarket {
+    fn make_market(
+        range_min: Option<f64>,
+        range_max: Option<f64>,
+        yes_price: f64,
+        no_price: f64,
+    ) -> TempMarket {
         TempMarket {
             yes_token_id: "yes".into(),
             no_token_id: "no".into(),
@@ -897,6 +942,7 @@ mod cross_market_tests {
             private_key: String::new(),
             min_confidence: 0.72,
             max_position_size_usdc: dec!(10),
+            bankroll_usdc: dec!(100),
             min_order_size_usdc: dec!(1),
             run_interval_secs: 3600,
             dry_run: true,
@@ -918,6 +964,8 @@ mod cross_market_tests {
             weather_intraday_poll_secs: 180,
             edge_min: 0.02,
             max_spread_cents: 5.0,
+            max_quote_age_secs: 15,
+            max_open_positions: 10,
             forecast_change_trigger_degrees: 0.4,
             implied_move_trigger_cents: 2.0,
             num_sources_required: 3,
@@ -953,7 +1001,7 @@ mod cross_market_tests {
         ];
 
         let cfg = test_cfg();
-        let decisions = evaluate_cross_market_group(&markets, 28.2, 0.82, &cfg);
+        let decisions = evaluate_cross_market_group(&markets, 28.2, 0.82, 1.0, &cfg);
 
         // Deve ter decidido algo para os bins
         let yes_decisions: Vec<_> = decisions
@@ -966,8 +1014,10 @@ mod cross_market_tests {
             .collect();
 
         // Deve ter pelo menos uma decisão YES no bin correto (m28)
-        assert!(!yes_decisions.is_empty() || !no_decisions.is_empty(),
-            "should have at least one decision");
+        assert!(
+            !yes_decisions.is_empty() || !no_decisions.is_empty(),
+            "should have at least one decision"
+        );
     }
 
     #[test]
@@ -978,8 +1028,7 @@ mod cross_market_tests {
         let cfg = test_cfg();
 
         // Confiança abaixo do threshold → skip
-        let decisions = evaluate_cross_market_group(&markets, 28.2, 0.50, &cfg);
+        let decisions = evaluate_cross_market_group(&markets, 28.2, 0.50, 1.0, &cfg);
         assert!(decisions.is_empty());
     }
 }
-

@@ -1,5 +1,6 @@
 use crate::config::{KellyParams, RiskParams};
 use crate::types::{BayesianPrediction, KellyResult, TradeSide};
+use chrono::Utc;
 
 #[derive(Debug, Clone)]
 pub struct KellyCriterion {
@@ -9,6 +10,8 @@ pub struct KellyCriterion {
     consecutive_losses: u32,
     consecutive_wins: u32,
     peak_bankroll: f64,
+    initial_bankroll: f64,
+    last_loss_at: Option<i64>,
 }
 
 impl KellyCriterion {
@@ -20,6 +23,31 @@ impl KellyCriterion {
             consecutive_losses: 0,
             consecutive_wins: 0,
             peak_bankroll: bankroll,
+            initial_bankroll: bankroll,
+            last_loss_at: None,
+        }
+    }
+
+    pub fn sync_settlements(&mut self, settlements: &[(i64, i64)]) {
+        self.bankroll = self.initial_bankroll;
+        self.peak_bankroll = self.initial_bankroll;
+        self.consecutive_losses = 0;
+        self.consecutive_wins = 0;
+        self.last_loss_at = None;
+
+        let mut ordered = settlements.to_vec();
+        ordered.sort_by_key(|(_, settled_at)| *settled_at);
+        for (pnl_cents, settled_at) in ordered {
+            self.bankroll = (self.bankroll + pnl_cents as f64 / 100.0).max(0.0);
+            self.peak_bankroll = self.peak_bankroll.max(self.bankroll);
+            if pnl_cents < 0 {
+                self.consecutive_losses += 1;
+                self.consecutive_wins = 0;
+                self.last_loss_at = Some(settled_at);
+            } else if pnl_cents > 0 {
+                self.consecutive_wins += 1;
+                self.consecutive_losses = 0;
+            }
         }
     }
 
@@ -83,9 +111,17 @@ impl KellyCriterion {
         let adjusted_multiplier = self.dynamic_multiplier();
         let kelly_fraction = kelly_full * adjusted_multiplier;
         let raw_size = self.bankroll * kelly_fraction;
-        let mut position_size = self.apply_limits(raw_size, confidence);
+        let position_size = self.apply_limits(raw_size, confidence);
         if position_size < self.params.min_position_size {
-            position_size = self.params.min_position_size;
+            return self.no_bet(
+                format!(
+                    "Kelly ${position_size:.2} abaixo do minimo ${:.2}",
+                    self.params.min_position_size
+                ),
+                confidence,
+                edge,
+                direction,
+            );
         }
 
         let entry_price = match direction {
@@ -122,6 +158,19 @@ impl KellyCriterion {
                     current_positions, self.risk.max_concurrent_positions
                 ),
             );
+        }
+        if let Some(last_loss_at) = self.last_loss_at {
+            let cooldown = self.risk.loss_cooldown_minutes as i64 * 60;
+            let remaining = cooldown - (Utc::now().timestamp() - last_loss_at);
+            if remaining > 0 {
+                return (
+                    false,
+                    format!(
+                        "cooldown apos loss: {} minuto(s) restante(s)",
+                        (remaining + 59) / 60
+                    ),
+                );
+            }
         }
         if result.position_size / self.bankroll > self.params.max_bankroll_per_trade {
             return (false, "Posicao acima do limite de bankroll".into());

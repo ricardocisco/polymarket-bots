@@ -146,63 +146,28 @@ pub fn analyze_candles(
         0.0
     };
 
-    let mut up_prob = 0.50;
-    if rsi > 80.0 {
-        up_prob -= 0.12;
-    } else if rsi > 70.0 {
-        up_prob -= 0.06;
-    } else if rsi > 60.0 {
-        up_prob += 0.02;
-    } else if rsi < 30.0 {
-        up_prob += 0.12;
-    } else if rsi < 40.0 {
-        up_prob += 0.06;
-    }
-
-    if macd > 0.5 {
-        up_prob += (macd.abs() / current_price * 6000.0).min(0.12);
-    } else if macd > 0.0 {
-        up_prob += 0.04;
-    } else if macd < -0.5 {
-        up_prob -= (macd.abs() / current_price * 6000.0).min(0.12);
+    // Probabilidade estrutural de terminar acima do strike. A volatilidade e a
+    // distancia sao calculadas em log-retornos, portanto funcionam na mesma
+    // escala para BTC, ETH e XRP. Indicadores tecnicos apenas fazem um ajuste
+    // pequeno; eles nao sao tratados como evidencias independentes.
+    let sigma_per_minute = realized_log_volatility(&closes).max(0.000_05);
+    let horizon = minutes_left.max(1.0 / 60.0);
+    let z = if strike_price > 0.0 && current_price > 0.0 {
+        (current_price / strike_price).ln() / (sigma_per_minute * horizon.sqrt())
     } else {
-        up_prob -= 0.04;
-    }
-
-    if momentum > 0.1 {
-        up_prob += 0.06;
-    } else if momentum > 0.02 {
-        up_prob += 0.03;
-    } else if momentum < -0.1 {
-        up_prob -= 0.06;
-    } else if momentum < -0.02 {
-        up_prob -= 0.03;
-    }
-
-    let speed_needed = distance_pct.abs() / minutes_left.max(0.5);
-    if distance_pct > 0.0 {
-        if speed_needed < 0.02 {
-            up_prob += 0.15;
-        } else if speed_needed < 0.05 {
-            up_prob += 0.08;
-        } else {
-            up_prob += 0.03;
-        }
-    } else if speed_needed < 0.02 {
-        up_prob -= 0.15;
-    } else if speed_needed < 0.05 {
-        up_prob -= 0.08;
+        0.0
+    };
+    let structural_prob = normal_cdf(z);
+    let rsi_adjustment = ((rsi - 50.0) / 50.0).clamp(-1.0, 1.0) * 0.025;
+    let momentum_adjustment = (momentum / 0.25).clamp(-1.0, 1.0) * 0.025;
+    let macd_pct = if current_price > 0.0 {
+        macd / current_price * 100.0
     } else {
-        up_prob -= 0.03;
-    }
-
-    if minutes_left < 3.0 && distance_pct > 0.0 {
-        up_prob += 0.05;
-    } else if minutes_left < 3.0 && distance_pct < 0.0 {
-        up_prob -= 0.05;
-    }
-
-    up_prob = up_prob.clamp(0.05, 0.95);
+        0.0
+    };
+    let macd_adjustment = (macd_pct / 0.05).clamp(-1.0, 1.0) * 0.015;
+    let up_prob = (structural_prob + rsi_adjustment + momentum_adjustment + macd_adjustment)
+        .clamp(0.001, 0.999);
     let down_prob = 1.0 - up_prob;
     let edge = (up_prob - 0.5_f64).abs();
     let confidence = if edge >= 0.15 {
@@ -287,5 +252,80 @@ fn price_momentum(closes: &[f64], periods: usize) -> f64 {
         0.0
     } else {
         ((new - old) / old) * 100.0
+    }
+}
+
+fn realized_log_volatility(closes: &[f64]) -> f64 {
+    let returns = closes
+        .windows(2)
+        .filter_map(|window| {
+            (window[0] > 0.0 && window[1] > 0.0).then(|| (window[1] / window[0]).ln())
+        })
+        .collect::<Vec<_>>();
+    if returns.len() < 2 {
+        return 0.0;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (returns.len() - 1) as f64;
+    variance.sqrt()
+}
+
+// Aproximacao de Abramowitz-Stegun para a CDF normal padrao.
+fn normal_cdf(value: f64) -> f64 {
+    let x = value.abs();
+    let t = 1.0 / (1.0 + 0.231_641_9 * x);
+    let density = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let tail = density
+        * t
+        * (0.319_381_530
+            + t * (-0.356_563_782
+                + t * (1.781_477_937 + t * (-1.821_255_978 + t * 1.330_274_429))));
+    if value >= 0.0 {
+        1.0 - tail
+    } else {
+        tail
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candles(prices: &[f64]) -> Vec<Candle> {
+        prices
+            .iter()
+            .enumerate()
+            .map(|(i, price)| Candle {
+                open_time: i as i64 * 60,
+                open: *price,
+                high: *price,
+                low: *price,
+                close: *price,
+                volume: 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn probability_can_exceed_entry_band_when_strike_is_safe() {
+        let prices = (0..50).map(|i| 100.0 + i as f64 * 0.02).collect::<Vec<_>>();
+        let signal = analyze_candles("TEST", 99.0, 1.0, &candles(&prices)).unwrap();
+        assert!(signal.up_probability > 0.99, "p={}", signal.up_probability);
+    }
+
+    #[test]
+    fn scale_invariant_probability_is_similar() {
+        let prices = (0..50).map(|i| 100.0 + i as f64 * 0.03).collect::<Vec<_>>();
+        let scaled = prices
+            .iter()
+            .map(|price| price * 1000.0)
+            .collect::<Vec<_>>();
+        let a = analyze_candles("A", 99.0, 2.0, &candles(&prices)).unwrap();
+        let b = analyze_candles("B", 99_000.0, 2.0, &candles(&scaled)).unwrap();
+        assert!((a.up_probability - b.up_probability).abs() < 1e-9);
     }
 }

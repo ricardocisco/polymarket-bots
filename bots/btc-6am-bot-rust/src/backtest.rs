@@ -71,18 +71,24 @@ pub async fn run_backtest_with_markets(
                 continue;
             }
         };
-        let Some(entry) = history.iter().min_by_key(|point| point.t) else {
+        let Some(raw_entry) = history
+            .iter()
+            .filter(|point| point.t >= start_ts && point.t <= end_ts)
+            .min_by_key(|point| point.t)
+        else {
             *result
                 .skip_reasons
                 .entry("sem preço de entrada".into())
                 .or_default() += 1;
             continue;
         };
+        let entry_price = (raw_entry.p * (1.0 + cfg.backtest_slippage_bps / 10_000.0)).min(0.999);
 
         let quote = QuoteSnapshot {
             best_bid: None,
-            best_ask: Some(entry.p),
-            last_price: Some(entry.p),
+            best_ask: Some(entry_price),
+            last_price: Some(entry_price),
+            ask_size: None,
         };
         let input = build_strategy_input(&market, quote, market.start_date, cfg);
         let decision = strategy.decide(&input);
@@ -109,7 +115,7 @@ pub async fn run_backtest_with_markets(
             .to_string()
             .parse::<f64>()
             .unwrap_or_default();
-        let shares = stake / entry.p;
+        let shares = stake / entry_price;
         let trade_pnl = shares * final_price - stake;
         let won = final_price > 0.5;
 
@@ -120,7 +126,7 @@ pub async fn run_backtest_with_markets(
         result.stake_total += stake;
         result.trades.push(BacktestTrade {
             market_label: market.display_label(),
-            entry_price: entry.p,
+            entry_price,
             final_price,
             pnl: trade_pnl,
             won,

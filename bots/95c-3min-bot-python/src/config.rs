@@ -29,7 +29,7 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
 
-        Ok(Self {
+        let cfg = Self {
             private_key: std::env::var("POLYMARKET_PRIVATE_KEY")
                 .or_else(|_| std::env::var("PRIVATE_KEY"))
                 .unwrap_or_default(),
@@ -60,7 +60,9 @@ impl Config {
             strategy_version: std::env::var("STRATEGY_VERSION")
                 .unwrap_or_else(|_| "rust-v2".into()),
             markets: default_markets(),
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     pub fn live_trading_enabled(&self) -> bool {
@@ -75,6 +77,29 @@ impl Config {
         self.min_entry_price = min_entry_price;
         self.max_entry_price = max_entry_price;
         self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !(0.0..=1.0).contains(&self.min_edge)
+            || !(0.0..1.0).contains(&self.min_entry_price)
+            || !(0.0..1.0).contains(&self.max_entry_price)
+            || self.min_entry_price > self.max_entry_price
+        {
+            anyhow::bail!("MIN_EDGE e faixa de entrada invalidos");
+        }
+        if self.bankroll <= 0.0
+            || self.position_size_usdc <= 0.0
+            || self.position_size_usdc > self.bankroll
+        {
+            anyhow::bail!("BANKROLL/POSITION_SIZE_USDC invalidos");
+        }
+        if self.min_minutes_left < 0.0
+            || self.min_minutes_left > self.max_minutes_left
+            || self.loop_interval_secs == 0
+        {
+            anyhow::bail!("janela temporal ou LOOP_INTERVAL invalido");
+        }
+        Ok(())
     }
 }
 

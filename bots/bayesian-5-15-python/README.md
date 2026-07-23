@@ -41,9 +41,9 @@ Principais variaveis:
 ```env
 DRY_RUN=true
 ALLOW_LIVE_TRADING=false
-BAYESIAN_MODE=AGGRESSIVE_OPTIMIZED
+BAYESIAN_MODE=CONSERVATIVE
 BAYESIAN_BANKROLL=20
-BAYESIAN_FLAT_STAKE_USDC=1
+BAYESIAN_FLAT_STAKE_USDC=0
 PAPER_TRADES_PATH=data/paper_trades.json
 
 BAYESIAN_MIN_BUY_PRICE=0.50
@@ -94,4 +94,3 @@ Resolver paper trades abertos:
 ```bash
 cargo run --bin settle_open_trades
 ```
-

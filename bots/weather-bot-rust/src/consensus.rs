@@ -8,7 +8,7 @@
 //!   - Spread entre fontes (indicador de incerteza inter-modelo)
 //!
 //! ## Fórmula de confiança
-//! ```
+//! ```text
 //! conf = horizon_base × (1 - spread_penalty) × agreement_bonus
 //!
 //! horizon_base: D+0=0.82, D+1=0.74, D+2=0.66, D+3+=0.58
@@ -18,7 +18,7 @@
 
 use tracing::{debug, info};
 
-use crate::types::{ConsensusResult, SourceForecast, WeatherSource};
+use crate::types::{ConsensusResult, SourceForecast};
 
 /// Calcula o consensus a partir de uma lista de previsões de fontes distintas.
 ///
@@ -31,6 +31,7 @@ pub fn compute_consensus(sources: &[SourceForecast], days_ahead: usize) -> Conse
             predicted_temp: f64::NAN,
             confidence: 0.0,
             spread: 0.0,
+            uncertainty: f64::INFINITY,
             sources_count: 0,
             sources: Vec::new(),
         };
@@ -56,34 +57,39 @@ pub fn compute_consensus(sources: &[SourceForecast], days_ahead: usize) -> Conse
     let spread = (max_temp - min_temp).max(0.0);
 
     // ── 3. Confiança base pelo horizonte ──────────────────────────────────
-    let horizon_base: f64 = match days_ahead {
-        0 => 0.82,
-        1 => 0.74,
-        2 => 0.66,
-        _ => 0.58,
-    };
+    let predictive_variance = sources
+        .iter()
+        .map(|source| {
+            let weight = source.source.reliability_weight();
+            weight
+                * ((source.predicted_max - weighted_mean).powi(2)
+                    + source.uncertainty.max(0.1).powi(2))
+        })
+        .sum::<f64>()
+        / total_weight;
+    let uncertainty = predictive_variance.sqrt().max(0.25);
 
     // ── 4. Penalidade por spread alto entre fontes ────────────────────────
     // Spread de 3°C → penalidade máxima de -30%
-    let spread_penalty = (spread / 3.0).clamp(0.0, 0.30);
+    let spread_penalty = (spread / 3.0).clamp(0.0, 0.50);
 
     // ── 5. Bônus por acordo entre fontes ──────────────────────────────────
     // Considera "em acordo" se a previsão está dentro de 1°C da média
-    let agreement_radius = 1.0_f64;
+    let agreement_radius = uncertainty;
     let agreeing_sources = sources
         .iter()
         .filter(|s| (s.predicted_max - weighted_mean).abs() <= agreement_radius)
         .count();
 
     // Bônus escalonado: +5% por 3 fontes concordando, +10% por 4+
-    let agreement_bonus: f64 = match agreeing_sources {
-        n if n >= 4 => 1.10,
-        3 => 1.05,
-        _ => 1.00,
-    };
+    let agreement_bonus: f64 = if agreeing_sources >= 3 { 1.0 } else { 0.90 };
 
     // ── 6. Confiança final ────────────────────────────────────────────────
-    let confidence = (horizon_base * (1.0 - spread_penalty) * agreement_bonus).clamp(0.10, 0.97);
+    let horizon_penalty = 1.0 + days_ahead.saturating_sub(1) as f64 * 0.10;
+    let confidence = ((1.0 / (1.0 + uncertainty * horizon_penalty / 2.0))
+        * (1.0 - spread_penalty)
+        * agreement_bonus)
+        .clamp(0.10, 0.90);
 
     info!(
         "[consensus] D+{} | Prev={:.1} | Spread={:.1} | Fontes={} ({} concordam) | Conf={:.1}%",
@@ -108,6 +114,7 @@ pub fn compute_consensus(sources: &[SourceForecast], days_ahead: usize) -> Conse
         predicted_temp: weighted_mean,
         confidence,
         spread,
+        uncertainty,
         sources_count: sources.len(),
         sources: sources.to_vec(),
     }
@@ -125,6 +132,7 @@ pub fn consensus_to_forecast(
         max_temp: consensus.predicted_temp,
         unit,
         confidence: consensus.confidence,
+        uncertainty: consensus.uncertainty,
     }
 }
 
@@ -149,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn consensus_with_tight_spread_has_high_confidence() {
+    fn consensus_with_tight_spread_has_bounded_uncertainty() {
         // 4 fontes concordando em ~30°C → alta confiança
         let sources = vec![
             make_source(WeatherSource::OpenMeteoGfs, 30.0),
@@ -158,7 +166,12 @@ mod tests {
             make_source(WeatherSource::AviationWeatherTaf, 30.1),
         ];
         let result = compute_consensus(&sources, 1);
-        assert!(result.confidence > 0.75, "conf={}", result.confidence);
+        assert!(result.confidence > 0.50, "conf={}", result.confidence);
+        assert!(
+            (0.5..=1.5).contains(&result.uncertainty),
+            "sigma={}",
+            result.uncertainty
+        );
         assert!(result.spread < 1.0, "spread={}", result.spread);
         assert!((result.predicted_temp - 30.0).abs() < 0.5);
     }
@@ -185,7 +198,11 @@ mod tests {
         ];
         let result = compute_consensus(&sources, 1);
         // Com peso maior do ECMWF (1.20 vs 1.00), média ponderada > 29.5
-        assert!(result.predicted_temp > 29.5, "temp={}", result.predicted_temp);
+        assert!(
+            result.predicted_temp > 29.5,
+            "temp={}",
+            result.predicted_temp
+        );
     }
 
     #[test]

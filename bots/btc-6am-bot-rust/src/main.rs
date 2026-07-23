@@ -88,14 +88,19 @@ async fn main() -> Result<()> {
                 if traded_today.contains(&market.id) {
                     continue;
                 }
-                if traded_today.len() as u32 >= cfg.max_daily_trades {
+                let day_start_ts = current_day
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp();
+                if store.count_trades_since(day_start_ts).await? as u32 >= cfg.max_daily_trades {
                     warn!("limite diário de trades atingido");
                     break;
                 }
                 if !market.accepting_orders || !is_entry_window_open(&market, now, &cfg) {
                     continue;
                 }
-                if store.has_open_trade(&market.id).await? {
+                if store.has_trade(&market.id).await? {
                     continue;
                 }
 
